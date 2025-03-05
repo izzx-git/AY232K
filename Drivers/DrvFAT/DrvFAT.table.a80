@@ -1,0 +1,808 @@
+;Процедуры  FAT Driver. Работа с таблицей FAT
+;файл DrvFAT.table.a80
+;
+;fatClearCls		очистка кластера FAT
+;GetAdrRealSector	вычисление адреса физического сектора
+;FindFreeClsFSinfo	поиск свободного кластера начиная от параметра в FSinfo
+;FindFreeClsRoot	поиск свободного кластера начиная от корневого каталога
+;			(начало данных)
+;FindFreeCls		поиск свободного кластера
+;FreeClsChain		пометить всю цепочку кластеров как свободные
+;AddCls2Chain		добавить кластер в цепочку
+;SetLastClsInFAT	запись признака последнего кластера в цепочку кластеров
+;SetNClsInFAT		запись номера кластера в цепочку кластеров
+;SaveSecFAT2Buf		запись сектора таблицы FAT из буфера Buf4FAT
+;TestLastCLS		проверка на последний кластер файла
+;ReadFATnextCls		чтение номера следующего кластера
+;setFsInfoEmpty		сброс номера первого свободного кластера в FsInfo 
+;setFsInfoFreeCls	установка в FsInfo номера следующего свободного кластера
+;ReadFsIFreeCls		чтение номера первого свободного кластера из FSinfo
+;CountFreeCls		подсчет количества свободных кластеров в текущем разделе фат
+;SaveSecBuf2DIR		загрузка сектора каталога в буфер Buf4DIR
+;LoadSecDIR2Buf		загрузка сектора каталога в буфер Buf4DIR
+;LoadSecFAT2Buf		загрузка сектора в буфер Buf4FAT
+;
+;------------------------------------------------------------------------------
+fatClearCls	ifused
+;очистка кластера FAT
+;вх:  dehl - номер кластера FAT
+;     ix - адрес буфера
+;вых: cy=1 ошибки чтения/записи
+;       a=errRWnum
+;     cy=0 кластер очищен
+;	dehl - адрес первого сектора кластера
+;       bc=#0000
+;
+;fatClearCls
+;
+	call	GetAdrRealSector
+	ld	a,(LenCLSInSec)
+	ld	b,a
+	push	de
+	push	hl
+loop018	push	bc
+	push	hl
+	push	de		;LBA адрес сектора
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+	hddReadSec2IX		;чтение сектора с винчестера в буфер ix
+	jr	c,goto073	;ошибка чтения/записи
+	push	ix
+	pop	hl
+	ld	e,l
+	ld	d,h
+	inc	de
+	ld	bc,#01FF
+	ld	(hl),#00
+	ldir
+	hddWriteSecIX		;запись пустого сектора
+	jr	c,goto073	;ошибка чтения/записи
+	pop	de
+	pop	hl
+	pop	bc
+	call	Inc_DEHL
+	djnz	loop018
+	ld	c,b
+	jr	goto074
+goto073	ld	a,errRWnum
+	pop	de
+	pop	hl
+	pop	bc
+goto074	pop	hl
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+GetAdrRealSector	ifused
+;вычисление адреса физического сектора
+;вх:  dehl - номер кластера FAT
+;вых: dehl - адрес сектора
+;     hl',de',bc' - не меняются
+;
+;GetAdrRealSector
+;
+	ld	a,d
+	or	e
+	or	h
+	or	l
+	jr	z,goto015	;для нулевого кластера -> адрес корневого каталога. кластер 2
+;	jr	nz,goto015	;для нулевого кластера -> адрес корневого каталога. кластер 2
+;	ld	hl,(AdrFATonHDD)
+;	ld	de,(AdrFATonHDD+2)
+;	ld	bc,LenFATinSec
+;	push	bc
+;	call	Add_DEHL_adrBC
+;	pop	bc
+;	jp	Add_DEHL_adrBC
+;goto015
+
+;для кластера с даными
+	ld	bc,#FFFE
+	add	hl,bc
+	inc	bc
+	ex	de,hl
+	adc	hl,bc
+	ex	de,hl		;номер кластера-2
+goto015	ld	a,(LenCLSInSec)	;размер кластера в секторах
+	jr	goto016
+loop009	sla	l
+	rl	h
+	rl	e
+	rl	d
+goto016	rrca
+	jr	nc,loop009	;умножили на размер кластера
+	ld	bc,AdrPartBegin
+	call	Add_DEHL_adrBC	;прибавили смещение начала раздела на диске
+	ld	bc,AdrDataBegin	;адрес первого сектора данных раздела от BPB
+	jp	Add_DEHL_adrBC	;прибавили смещение начала данных в разделе
+
+	endif
+
+;------------------------------------------------------------------------------
+FindFreeClsFSinfo	ifused
+;поиск свободного кластера начиная от параметра в FSinfo
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     nc,z - свободный кластер не найден. FAT закончилась
+;     nc,nz - пустой кластер найден
+;       dehl - номер пустого кластера
+;
+;FindFreeClsFSinfo
+;
+	call	ReadFsIFreeCls
+	ret	c			;ошибка
+	jr	z,FindFreeClsRoot	;кластер не установлен
+	call	FindFreeCls
+	ret	c
+	ret	nz			;nc,nz пустой кластер найден
+	call	setFsInfoEmpty
+	jr	FindFreeClsRoot
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+FindFreeClsRoot	ifused
+;поиск свободного кластера начиная от корневого каталога (начало данных)
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     nc,z - свободный кластер не найден. FAT закончилась
+;     nc,nz - пустой кластер найден
+;       dehl - номер пустого кластера
+;
+;FindFreeClsRoot
+;
+	ld	hl,(RootClaster)
+	ld	de,(RootClaster+2)
+	jr	FindFreeCls
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+FindFreeCls	ifused
+;поиск свободного кластера
+;вх:  dehl - номер кластера от которого начинаем поиск
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     nc,z - свободный кластер не найден. FAT закончилась
+;     nc,nz - пустой кластер найден
+;       dehl - номер пустого кластера
+;
+;FindFreeCls
+;
+;смещение от начального номера кластера =#00
+	push	de
+	push	hl
+	call	SetZero2tmpDWORD
+
+;загрузим сектор с кластером
+;  рассчитаем смещение в секторах от начала FAT таблицы
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl		;hlde=dehl*2
+	ex	de,hl		;dehl=dehl*2
+	ld	c,l
+	srl	c
+	ld	b,#00		;bc номер записи в секторе
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	d,b		;dehl - смещение в секторах от начала FAT таблицы
+;  проверим не вышли ли за границы FAT
+loop008	push	de
+	push	hl
+	push	bc
+	ld	bc,LenFATinSec
+	call	cmp_DEHL_adrBC
+	jr	z,goto012		;FAT закончилась
+	jr	c,goto012		;FAT закончилась
+	call	LoadSecFAT2Buf
+	jr	c,goto013		;ошибки чтения/записи
+	pop	bc
+	add	hl,bc
+	add	hl,bc
+	add	hl,bc
+	add	hl,bc
+
+;ищем в загруженном секторе пустой кластер
+loop007	push	hl
+	call	LD_DEHL_adrHL		;ld dehl,(hl)
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	pop	hl
+	jr	z,goto014		;пустой кластер найден
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	b
+	inc	c
+	jp	p,loop007
+
+;следующий сектор с FAT
+	call	proc_04		;прибавим к (tmpDWORD) + b
+	pop	hl
+	pop	de
+	call	Inc_DEHL	;инкремент номера сектора
+	ld	bc,#0000
+	jr	loop008
+
+;номер стартового кластера + b + (tmpDWORD)
+;nc,nz - пустой кластер найден
+goto014	pop	hl
+	pop	de
+	call	proc_04		;прибавим к (tmpDWORD) + b
+	pop	hl
+	pop	de
+	ld	bc,tmpDWORD
+	call	Add_DEHL_adrBC	;dehl=dehl+(tmpDWORD)
+	xor	a
+	inc	a
+	ret
+
+;nc,z - свободный кластер не найден. FAT закончилась
+goto012	xor	a
+
+;cy=1 ошибки чтения/записи
+goto013	pop	bc
+	pop	bc
+	pop	bc
+	pop	hl
+	pop	de
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;прибавим к (tmpDWORD) + b
+proc_04	ld	hl,tmpDWORD
+	ld	a,(hl)
+	add	a,b
+	ld	(hl),a
+	ret	nc
+	inc	hl
+	inc	(hl)
+	ret	nz
+	inc	hl
+	inc	(hl)
+	ret	nz
+	inc	hl
+	inc	(hl)
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+FreeClsChain	ifused
+;пометить всю цепочку кластеров как свободные
+;вх:  dehl - номер (первого)кластера в цепочке
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;FreeClsChain
+;
+;прочитаем номер кластера в FSinfo
+	push	hl
+	push	de
+	call	ReadFsIFreeCls
+	pop	de
+	pop	hl
+	ret	c
+
+;номер для записи
+	call	SetZero2tmpDWORD
+
+;проверим не последний ли
+loop006	call	TestLastCLS
+	ccf
+	jp	nc,setFsInfoVar		;это последний кластер
+;	ret	nc			;это последний кластер
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	jp	z,setFsInfoVar		;это пустой кластер
+;	ret	z			;это пустой кластер
+
+;установим номер кластера в переменной FSinfo
+;  dehl - номер кластера в цепочке
+	ld	bc,FsINextCls
+	call	cmp_DEHL_adrBC
+	jp	m,goto203
+	ld	(FsINextCls+0),hl
+	ld	(FsINextCls+2),de
+
+;читаем номер следующего кластера
+goto203	push	hl
+	push	de
+	call	ReadFATnextCls		;читаем номер следующего кластера
+	pop	bc
+	jr	c,goto009		;ошибка
+	ex	(sp),hl
+	push	de
+	ld	e,c
+	ld	d,b
+	call	SetNClsInFAT		;пишем в текущий значение 0
+	pop	de
+	pop	hl
+	jr	nc,loop006
+	ret
+goto009	pop	bc
+	ret
+	
+	endif
+
+;------------------------------------------------------------------------------
+AddCls2Chain	ifused
+;добавить кластер в цепочку
+;вх:  dehl - номер (первого)кластера в цепочке
+;     (tmpDWORD) - номер кластера, который будем записывать в цепочку кластеров
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;AddCls2Chain
+;
+loop005	push	hl
+	push	de
+	call	ReadFATnextCls	;dehl номер следующего кластера
+	jr	c,goto008	;ошибка чтения
+	call	TestLastCLS
+	jr	c,goto007
+	pop	bc
+	pop	bc
+	jr	loop005
+
+;выход по ошибке
+goto008	pop	de
+	pop	hl
+	ld	a,errRWnum	;R/W error _число_
+	scf
+	ret			;ошибка
+
+;добавление кластера в цепочку
+goto007	pop	de
+	pop	hl
+	call	SetNClsInFAT	;запись номера кластера в цепочку кластеров
+	ret	c
+	ld	hl,tmpDWORD
+	call	LD_DEHL_adrHL
+	jr	SetLastClsInFAT
+	org	$-2
+
+/* старое, криво работает
+loop005	call	TestLastCLS
+	jr	c,goto007	;это последний кластер
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	jr	z,goto008	;это пустой кластер
+	call	ReadFATnextCls	;dehl - номер следующего кластера
+	jr	nc,loop005
+goto008	ld	a,errRWnum	;R/W error _число_
+	scf
+	ret			;ошибка
+goto007	pop	de
+	pop	hl
+	call	SetNClsInFAT	;запись номера кластера в цепочку кластеров
+	ret	c
+	ld	hl,tmpDWORD
+	call	LD_DEHL_adrHL
+	jr	SetLastClsInFAT
+	org	$-2
+*/
+	endif
+
+;------------------------------------------------------------------------------
+SetLastClsInFAT	ifused
+;запись признака последнего кластера в цепочку кластеров
+;вх:  dehl - номер кластера в который запишем номер кластера
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;SetLastClsInFAT
+;
+	ld	bc,#FFFF
+	ld	(tmpDWORD),bc
+	ld	b,#0F
+	ld	(tmpDWORD+2),bc
+	jr	SetNClsInFAT
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+SetNClsInFAT	ifused
+;запись номера кластера в цепочку кластеров
+;вх:  dehl - номер кластера в который запишем номер кластера
+;     (tmpDWORD) - номер кластера, который будем записывать в цепочку кластеров
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;SetNClsInFAT
+;
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl		;hlde=dehl*2
+	ex	de,hl		;dehl=dehl*2
+	ld	c,l
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	d,#00		;dehl - смещение в секторах от начала FAT таблицы
+	push	de
+	push	hl
+ 	push	bc		;a - смещение в секторе/2
+	call	LoadSecFAT2Buf	;hl адрес буфера с сектором
+	pop	de
+	jr	c,goto006	;ошибка
+	ld	d,#00
+	add	hl,de
+	add	hl,de		;адрес записи с номером следующего кластера
+	ex	de,hl
+	ld	hl,tmpDWORD
+	call	CopyDWORD_HL_DE	
+	pop	hl
+	pop	de
+	jp	SaveSecFAT2Buf
+goto006	pop	hl
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SaveSecFAT2Buf	ifused
+;запись сектора таблицы FAT из буфера Buf4FAT
+;вх:  dehl - номер сектора в таблице FAT (отсчет от нуля)
+;вых: cy=1 были ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;SaveSecFAT2Buf
+;
+	ld	a,(NumsFATonPart)
+	ld	bc,AdrFATonHDD
+loop004	push	af
+	call	Add_DEHL_adrBC	;сложение 4х-байтного числа по адресу bc и dehl
+
+;запись сектора в таблицу FAT
+	push	de
+	push	hl		;dehl - LBA адрес сектора FAT 
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS
+	ld	hl,Buf4FAT
+	hddWriteSecHL		;запись сектора на винчестер из буфера hl
+	pop	hl
+	pop	de
+	pop	bc
+	ld	a,errRWnum	;R/W error _число_
+	ret	c		;ошибка
+	ld	a,b
+	ld	bc,LenFATinSec
+	dec	a
+	jr	nz,loop004
+	ret		
+
+	endif
+
+;------------------------------------------------------------------------------
+TestLastCLS	ifused
+;проверка на последний кластер файла
+;вх:  dehl - номер кластера
+;вых: nz,nc - этот кластер не последний
+;      z,nc - кластер поврежден
+;     nz,c  - кластер последний
+;
+;TestLastCLS
+;
+	or	a
+	push	hl
+	ld	hl,#0FFF
+	sbc	hl,de
+	pop	hl
+	ret	nz
+	push	de
+	ld	de,#FFF7
+	ex	de,hl
+	sbc	hl,de
+	ex	de,hl
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+ReadFATnextCls	ifused
+;чтение номера следующего кластера
+;вх:  dehl - номер кластера
+;вых: cy=1 ошибки чтения
+;        a=errRWnum - код ошибки
+;     dehl - номер следующего кластера
+;     hl',de',bc' - ???
+;
+;ReadFATnextCls
+;
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl		;hlde=dehl*2
+	ex	de,hl		;dehl=dehl*2
+	ld	a,l
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	d,#00		;dehl - смещение в секторах от начала FAT таблицы
+	push	af		;a - смещение в секторе/2
+	call	LoadSecFAT2Buf	;hl адрес буфера с сектором
+	jr	c,goto005	;ошибка
+	pop	af
+	ld	e,a
+	ld	d,#00
+	add	hl,de
+	add	hl,de		;адрес записи с номером следующего кластера
+	jp	LD_DEHL_adrHL	;ld dehl,(hl)
+goto005	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+setFsInfoEmpty	ifused
+;сброс номера первого свободного кластера в FsInfo 
+;  (установка номера #FFFFFFFF)
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     de,hl,bc - не меняется
+;
+;setFsInfoEmpty
+;
+	push	hl
+	push	de
+	push	bc
+	ld	hl,#FFFF
+	ld	e,h
+	ld	d,h
+	call	setFsInfoFreeCls
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+setFsInfoVar	ifused
+;установка в FsInfo номера следующего свободного кластера из переменной FsINextCls
+;вх:  (FsINextCls) - номер свободного кластера
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     dehl - не меняется
+;
+;setFsInfoVar
+;
+	ld	hl,FsINextCls
+	call	LD_DEHL_adrHL
+	jr	setFsInfoFreeCls
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+setFsInfoFreeCls	ifused
+;установка в FsInfo номера следующего свободного кластера
+;вх:  dehl - номер свободного кластера
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     dehl - не меняется
+;
+;setFsInfoFreeCls
+;
+	push	hl
+	push	de
+	call	ReadFsIFreeCls
+	pop	de
+	pop	hl
+	ret	c
+	ld	(Buf4MBR+#1EC+0),hl
+	ld	(Buf4MBR+#1EC+2),de
+	ld	hl,Buf4MBR
+	hddWriteSecHL
+	jr	goto030
+
+	endif
+
+;------------------------------------------------------------------------------
+ReadFsIFreeCls	ifused
+;чтение номера первого свободного кластера из FSinfo
+;вых: cy=1 ошибки чтения
+;        a=errRWnum - код ошибки
+;     cy=0 номер клстера прочитан
+;        (FsINextCls),dehl - номер свободного кластера из FSinfo
+;        z - номер клатера =#FFFFFFFF
+;     bc,a - ???
+;
+;ReadFsIFreeCls
+;
+	ld	hl,(AdrPartBegin)
+	ld	de,(AdrPartBegin+2)
+	ld	bc,(AdrFsInfo)
+	add	hl,bc
+	jr	nc,goto029
+	inc	de
+goto029	hddSetCurrSec			;расчет и установка в переменных адреса LBA/CHS
+	ld	hl,Buf4MBR
+	hddReadSec2HL			;чтение сектора с винчестера в буфер hl
+goto030	ld	a,errRWnum		;R/W error _число_
+	ret	c
+	ld	hl,(Buf4MBR+#1EC+0)
+	ld	de,(Buf4MBR+#1EC+2)
+	ld	(FsINextCls+0),hl
+	ld	(FsINextCls+2),de
+	ld	a,l
+	and	h
+	and	e
+	and	d
+	inc	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+CountFreeCls	ifused
+;подсчет количества свободных кластеров в текущем разделе фат
+;вых: cy=1 ошибка чтения hdd
+;        a=errRWnum - код ошибки
+;     cy=0 ошибок не было
+;        dehl - количество свободных кластеров
+;
+;CountFreeCls
+;
+	call	SetZero2tmpDWORD
+	ld	hl,(LenFATinSec)
+	ld	de,(LenFATinSec+2)
+
+;загрузка очередного сектора FAT
+;  dehl порядковый номер сектора в таблице FAT
+loop003	call	Dec_DEHL
+	push	hl
+	push	de
+	call	LoadSecFAT2Buf	;загрузка сектора FAT
+	jr	c,goto003
+
+;подсчет пустых кластеров в секторе FAT
+	ld	b,#80
+loop002	ld	a,(hl)
+	inc	hl
+	or	(hl)
+	inc	hl
+	or	(hl)
+	inc	hl
+	or	(hl)
+	inc	hl
+	jr	nz,goto004
+	ex	de,hl
+	ld	hl,tmpDWORD
+	call	Inc_addrHL
+	ex	de,hl
+goto004	djnz	loop002
+
+;следующий сектор FAT
+	pop	de
+	pop	hl
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	jr	nz,loop003
+
+;количество пустых кластеров
+	ld	hl,(tmpDWORD)
+	ld	de,(tmpDWORD+2)
+	ret	
+
+;ошибка чтения винчестера
+goto003	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SaveSecBuf2DIR	ifused
+;запись сектора каталога в буфер Buf4DIR
+;вх:  (SecDIRinBuf) - LBA адрес сектора каталога
+;вых: cy=1 были ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;
+;SaveSecBuf2DIR
+;
+	ld	hl,SecDIRinBuf
+	call	LD_DEHL_adrHL
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS
+	ld	hl,Buf4DIR	;(xE046) параметры LBA/CHS в зависимости от настроек
+	hddWriteSecHL
+	ret	nc
+	ld	a,errRWnum	;R/W error _число_
+	ret
+
+	endif	
+
+;------------------------------------------------------------------------------
+LoadSecDIR2Buf	ifused
+;загрузка сектора каталога в буфер Buf4DIR
+;вх:  dehl - LBA адрес сектора каталога
+;вых: hl=Buf4DIR
+;     cy=1 были ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     hl',de',bc' - ???
+;
+;LoadSecDIR2Buf
+;
+	ld	bc,SecDIRinBuf
+	call	proc_02		;проверка, не загружен ли сектор в буфер
+	jr	nz,goto002	;загружаем
+	ld	hl,Buf4DIR
+	ret
+;чтение сектора
+goto002	ld	(SecDIRinBuf),hl
+	ld	(SecDIRinBuf+2),de
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS
+	ld	hl,Buf4DIR	;(xE046) параметры LBA/CHS в зависимости от настроек
+	call	proc_03
+	ld	hl,Buf4DIR
+	ret
+
+	jr	LoadSecFAT2Buf
+	org	$-2
+	endif	
+
+;------------------------------------------------------------------------------
+LoadSecFAT2Buf	ifused
+;загрузка сектора таблицы FAT в буфер Buf4FAT
+;вх:  dehl - номер сектора в таблице FAT (отсчет от нуля)
+;вых: hl=Buf4FAT
+;     cy=1 были ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;     hl',de',bc' - ???
+;
+;LoadSecFAT2Buf
+;
+	ld	bc,AdrFATonHDD
+	call	Add_DEHL_adrBC	;сложение 4х-байтного числа по адресу bc и dehl
+	call	proc_01		;проверка, не загружен ли сектор в буфер
+	jr	nz,goto001	;загружаем
+	ld	hl,Buf4FAT
+	ret
+;чтение сектора
+goto001	ld	(SecFATinBuf),hl
+	ld	(SecFATinBuf+2),de
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS
+	ld	hl,Buf4FAT	;(xE046) параметры LBA/CHS в зависимости от настроек
+proc_03	push	hl
+	hddReadSec2HL		;чтение сектора с винчестера в буфер hl
+	pop	hl
+	ret	nc
+	ld	a,errRWnum	;R/W error _число_
+	ret
+;проверка, не загружен ли сектор в буфер
+;вых: z - сектор уже загружен
+proc_01	ld	bc,SecFATinBuf
+proc_02	ld	a,(bc)
+	inc	bc
+	cp	l
+	ret	nz
+	ld	a,(bc)
+	inc	bc
+	cp	h
+	ret	nz
+	ld	a,(bc)
+	inc	bc
+	cp	e
+	ret	nz
+	ld	a,(bc)
+	cp	d
+	ret
+
+	endif
+
+;==============================================================================

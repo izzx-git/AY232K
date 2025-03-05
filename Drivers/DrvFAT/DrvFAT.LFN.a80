@@ -1,0 +1,429 @@
+;Процедуры  FAT Driver. работа с длинными именами
+;файл DrvFAT.LFN.a80
+;
+;lfnSetOneEntry		установка одной записи LFN в буфере
+;fatSetSFNname		формирование короткого имени с проверкой существования
+;			файла
+;fatGetLongName		получение длинного имени файла
+;lfnGetOneGroupName	выделение части длинного имени из дескриптора
+;strGetShortName	копирование в буфер короткого имени с переводом символов
+;			в нижний регистр
+;
+;------------------------------------------------------------------------------
+lfnSetOneEntry	ifused
+;установка одной записи LFN в буфере
+;вх:  de - адрес в строке с именем
+;     hl - адрес записи в буфере
+;     b - номер устанавливаемой записи
+;     c - контрольная сумма короткого имени
+;вых: de - следующий адрес строки с именем
+;     hl - адрес записи в буфере +#20
+;     b - номер устанавливаемой записи
+;     c - контрольная сумма короткого имени
+;
+;lfnSetOneEntry
+;
+; +#00 номер записи с длиным именем
+	ld	(hl),b
+	inc	hl
+; +#01..#0A (5 символов)
+	or	a
+	ld	a,#05
+	call	lfnSetOneGroupName
+; +#0B..#0C
+	ld	(hl),#0F
+	inc	hl
+	ld	(hl),#00
+	inc	hl
+; +#0D контрольная сумма короткого имени
+	ld	(hl),c
+	inc	hl
+; +#0E..#19 (6 символов)
+	ld	a,#06
+	call	lfnSetOneGroupName
+; +#1A..#1B нули
+	ld	(hl),#00
+	inc	hl
+	ld	(hl),#00
+	inc	hl
+; +#1C..#1F (2 символа)
+	ld	a,#02
+;	call	lfnSetOneGroupName
+;	ret
+
+	endif
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+lfnSetOneGroupName	ifused
+;преобразование строки в часть длинного имени
+;вх:  a - количество символов в группе
+;     hl - адрес группы в дескрипторе
+;     de - адрес строки источника
+;     cy=1 заполняем дальше #FF
+;вых: cy=1 - конец имени, дальше заполняем #FF
+;     hl=hl+(a*2)
+;     de=de+a - следующий адрес в строке с именем
+;
+;lfnSetOneGroupName
+;
+	push	bc
+	ld	b,a
+	sbc	a,a			;cy=1 -> a=#FF, cy=1
+	jr	c,goto163		;дальше нет символов в имени
+loop062	ld	a,(de)
+	or	a
+	jr	z,goto163		;конец имени
+	push	de
+	ld	de,#005F		;"_"
+	call	chrCheckLFN		;проверка на допустимость символа
+	jr	z,goto164		;не допустимый символ в имени файла
+	ld	e,a
+	cp	#80
+	jr	c,goto164		;символы латиницы или конец строки
+	cp	#A0
+	jr	c,goto165		;А..Я -> -#70
+	cp	#B0
+	jr	c,goto165		;а..п -> -#70
+	cp	#E0
+	jr	c,goto164		;графические символы недопустимы
+	cp	#F0
+	jr	c,goto166		;р..я -> -#A0
+	cp	#F1
+	jr	c,goto167		;Ё -> -#EF
+	jr	z,goto166		;ё -> -#A0
+	jr	goto164			;остальное недопустимо
+goto167	sub	#4F
+goto166	sub	#30			;-#A0
+goto165	sub	#70			;-#70
+	ld	e,a
+	ld	d,#04
+goto164	ld	(hl),e
+	inc	hl
+	ld	(hl),d
+	inc	hl
+	pop	de
+	inc	de
+	djnz	loop062
+	pop	bc
+	or	a
+	ret
+;конец имени
+goto163	ld	(hl),a
+	inc	hl
+	ld	(hl),a
+	inc	hl
+	ld	a,#FF
+	djnz	goto163
+	pop	bc
+	scf
+	ret	
+
+	endif
+
+;------------------------------------------------------------------------------
+fatSetSFNname	ifused
+;формирование короткого имени с проверкой существования файла
+;вх:  ix - адрес буфера fcb
+;     hl - адрес строки с именем файла
+;вых: hl - не меняется
+;     b =#00
+;     c - контрольная сумма имени
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errInvFileName файл с таким именем существует
+;     cy=0 запись не найдена
+;
+;fatSetSFNname
+;
+	push	hl
+	push	ix
+	pop	de
+	call	FileNameLFNto8dot3	;формируем короткое имя
+	push	bc			;b=#00
+	jr	goto159			;ищем файл
+
+;откорректируем имя с тильдой, если надо
+loop061	push	bc
+	dec	hl
+	dec	hl
+	dec	hl
+	dec	hl			;hl+7 в имени фйайла
+	ld	a,b
+	and	#0F
+	add	a,#30
+	ld	(hl),a			;второй символ после тильды
+	dec	hl
+	ld	a,b
+	rrca
+	rrca
+	rrca
+	rrca
+	and	#0F
+	jr	z,goto160			;ставим тильду
+	add	a,#30
+	ld	(hl),a
+	dec	hl
+goto160	ld	(hl),"~"
+goto159	push	ix
+	pop	hl			;адрес имени в fcb
+	call	fatFindEntryDir		;поиск файла в каталоге
+;	call	fcbFindEntry		;поиск файла в каталоге
+	pop	bc
+	jr	c,goto161		;ошибка чтения
+	jr	nz,goto161		;файл с таким именем не найден
+	inc	b
+	jr	nz,loop061		;файл с таким именем существует
+	ld	a,errInvFileName
+	scf
+
+;подсчет контрольной суммы короткого имени
+goto161	push	af
+	push	ix
+	pop	hl
+	xor	a
+	ld	b,#0B
+goto168	ld	c,a
+	rrca
+	and	#80
+	srl	c
+	add	a,c
+	add	a,(hl)
+	inc	hl
+	djnz	goto168
+	ld	c,a
+	pop	af
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatGetLongName	ifused
+;получение длинного имени файла
+;вх:  hl - адрес буфера для имени
+;     bc - номер записи в текущем каталоге
+;вых: hl - в буфере имя в формате ASCIZ (если длинное имя отсутсвует, то
+;          возвращается короткое имя)
+;     a - длина имени, с учетом нуля
+;
+;fatGetLongName
+;
+	push	hl
+	push	hl
+	call	fatGetEntryLong		;найти в текущем каталоге дескриптор записи по номеру
+	jr	c,goto157
+	bit	0,e
+	jp	z,lfnGetShortName	;нет длинного имени
+
+;чтение длинного имени файла
+	exx
+	ld	c,#00
+	exx
+loop059	dec	bc
+	call	fatGetEntry
+	jr	c,goto157
+	ld	a,(hl)
+	inc	hl
+	exx
+	bit	6,c
+	pop	hl			;буфер с именем
+	jr	nz,goto151
+	ld	c,a
+	exx
+	ld	a,#05			;количество символов
+	call	lfnGetOneGroupName
+	and	a
+	jr	z,goto156		;конец имени
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,#06
+	call	lfnGetOneGroupName
+	and	a
+	jr	z,goto156		;конец имени
+	inc	hl
+	inc	hl
+	ld	a,#02
+	call	lfnGetOneGroupName
+	and	a
+	jr	z,goto156		;конец имени
+	exx
+	push	hl
+	exx
+	jr	loop059
+
+;маркер конца имени и расчет длины
+goto156	exx
+goto151	ld	(hl),#00
+	inc	hl
+	pop	de
+	push	de
+	or	a
+	sbc	hl,de
+	ld	a,l
+	exx
+	pop	hl
+	ret
+
+;ошибка чтения
+goto157	pop	hl
+	pop	hl
+	ret
+	jr	strGetShortName
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+lfnGetOneGroupName	ifused
+;выделение части длинного имени из дескриптора
+;вх:  a - количество символов в группе
+;     hl - адрес группы в дескрипторе
+;     hl' - адрес приемника для имени
+;вых: z,a =#00 - конец имени
+;     hl=hl+(a*2)
+;     hl' - адрес приемника для имени
+;
+;lfnGetOneGroupName
+;
+	exx
+	ld	b,a
+	exx
+loop058	ld	d,(hl)
+	inc	hl
+	ld	e,(hl)
+	inc	hl
+	ld	a,d
+	or	e
+	ret	z
+	ld	a,e
+	and	a
+	jr	nz,goto152
+	ld	a,d
+	cp	#80
+	jr	c,goto153
+	ld	d,#5F
+	jr	goto153
+goto152	cp	#04
+	ld	a,#5F
+	jr	nz,goto153
+	ld	a,d
+	ld	de,#5FEF
+	cp	#01
+	jr	z,goto154
+	ld	e,#A0
+	cp	#51
+	jr	z,goto154
+	sub	#10
+	ld	e,#80
+	jr	nc,goto155
+	ld	a,d
+	jr	goto153
+goto155	cp	#30
+	jr	c,goto154
+	ld	e,#B0
+	cp	#40
+	jr	c,goto154
+	ld	a,d
+	jr	goto153
+goto154	add	a,e
+goto153	exx
+	ld	(hl),a
+	inc	hl
+	dec	b
+	exx
+	jr	nz,loop058
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+strGetShortName	ifused
+;копирование в буфер короткого имени с переводом символов в нижний регистр
+;вх:  hl - адрес дескриптора
+;     de - адрес приемника для имени
+;     a - атрибуты записи
+;вых: a - длина строки с именем
+;     hl - адрес начала имени
+;
+;strGetShortName
+;
+	push	de
+	push	de
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;копирование в буфер короткого имени с переводом символов в нижний регистр
+;вх:  hl - адрес дескриптора
+;     (sp) - адрес приемника для имени
+;     (sp) - адрес приемника для имени
+;     a - атрибуты записи
+;вых: a - длина строки с именем
+;     hl - адрес начала имени
+;
+lfnGetShortName
+;
+	pop	de
+	ld	c,a
+	ld	b,#08
+	call	proc_14			;копируем имя
+	ld	a,(hl)
+	cp	" "
+	jr	z,goto150		;нет расширения
+	ld	a,"."
+	ld	(de),a
+	inc	de
+	ld	b,#03
+	call	proc_14			;копируем расширение
+
+;маркер конца имени и расчет длины
+goto150	ex	de,hl
+	ld	(hl),#00
+	inc	hl
+	pop	de
+	or	a
+	sbc	hl,de
+	ld	a,l			;длина имени
+	ex	de,hl
+	ret
+
+;копирование имени/расширения в приемник с переводом в нижний регистр
+proc_14
+loop057	ld	a,(hl)
+	cp	" "
+	jr	z,goto146
+	bit	4,c
+	jr	nz,goto147		;это каталог
+	cp	"A"
+	jr	c,goto147
+	cp	"Z"+1
+	jr	c,goto148
+	cp	#80			;rus А
+	jr	c,goto147
+	cp	#90			;rus П+1
+	jr	c,goto148
+	cp	#A0			;rus Я+1
+	jr	c,goto149
+	cp	#F0
+	jr	nz,goto147		;rus Ё
+	inc	a
+	jr	goto147
+goto149	and	#EF
+	or	#40
+goto148	or	#20
+goto147	ld	(de),a
+	inc	de
+	inc	hl
+	djnz	loop057
+goto146	ld	a,b
+	add	a,l
+	ld	l,a
+	ret	nc
+	inc	h
+	ret
+
+	endif
+
+;==============================================================================

@@ -1,0 +1,102 @@
+;Переменные HDD Driver
+;файл DrvHDD.var.a80
+;
+;номер текущего контроллера
+;0,=1 SMUC v1 (shadow)
+;1,=1 SMUC v2
+;2,=1 Nemo
+;3,=1 Nemo A8
+;4,=1 ATM-IDE
+;5,=1 PROFI IDE
+;6,=? Z-Controller
+;7,=? DivMMC
+;
+ideType		db %00000100
+ideTypeMsk	db %01111111	;маска
+
+;0,=1 выбран master
+;1,=1 выбран slave
+;2,=1 выбрана SD
+selHdd	db	%00000000
+
+;------------------------------------------------------------------------------
+;параметры найденных винчестеров
+;=#00 винчестер не найден
+;1-0,=00 нет таблицы разделов
+;    =10 один раздел с начала диска
+;    =01 структура MBR
+;    =11 структура GPT
+;2,=???
+;3,=0/1 поддержка LBA32 off/on
+;4,=0/1 для SD  байтовая/блочная адресация
+;5,=1 есть поддержка CHS
+;6,=1 есть поддержка LBA
+;7,=1 винчестер/SD найден
+;
+;#0B блок переменных геометрии текущего винчестера
+CurrentIDE
+devCylinders	dw 0		;+#00 2 значение Cylinders HDD
+devHeads	db 0		;+#02 1 значение head HDD
+devSectors	db 0		;+#03 1 значение sector HDD
+devHmulS	dw 0		;+#04 2 произведение head * sectors
+devLBAsec	dd 0		;+#06 4 кол-во секторов LBA
+devFlags	db %00000000	;+#0A
+devPort1F6	db 0		;+#0B
+EndCurrentIDE
+
+;#0B блок переменных геометрии винчестера master
+MasterIDE
+MsCylinders	dw 0		;+#00 2 значение Cylinders HDD
+MsHeads		db 0		;+#02 1 значение head HDD
+MsSectors	db 0		;+#03 1 значение sector HDD
+MsHmulS		dw 0		;+#04 2 произведение head * sectors
+MsLBAsec	dd 0		;+#06 4 кол-во секторов LBA
+MsFlags		db %00000000	;+#0A
+MsPort1F6	db #E0		;+#0B
+
+;#0B блок переменных геометрии винчестера slave
+SlaveIDE
+SlCylinders	dw 0		;+#00 2 значение Cylinders HDD
+SlHeads		db 0		;+#02 1 значение head HDD
+SlSectors	db 0		;+#03 1 значение sector HDD
+SlHmulS		dw 0		;+#04 2 произведение head * sectors
+SlLBAsec	dd 0		;+#06 4 кол-во секторов LBA
+SlFlags		db %00000000	;+#0A
+SlPort1F6	db #F0		;+#0B
+
+;#0B блок переменных геометрии SD карты
+vSDcard
+sdCylinders	dw 0		;+#00 2 значение Cylinders HDD
+sdHeads		db 0		;+#02 1 значение head HDD
+sdSectors	db 0		;+#03 1 значение sector HDD
+sdHmulS		dw 0		;+#04 2 произведение head * sectors
+sdLBAsec	dd 0		;+#06 4 кол-во секторов LBA
+sdFlags		db %00000000	;+#0A
+sdPort1F6	db #F0		;+#0B
+
+;------------------------------------------------------------------------------
+;для записи в порты винчестера
+idePort1F1	db 0		;регистр дополнительных возможностей #1F1/#F9BE (не реализовано)
+secCounter
+idePort1F2	db 0		;регистр счетчика секторов #1F2/#FABE
+idePort1F3	db 0		;CHS номер сектора/LBA 7:0 #1F3/#FBBE
+idePort1F4	db 0		;CHS номер цилиндра low/LBA 15:8 #1F4/#FCBE
+idePort1F5	db 0		;CHS номер цилиндра high/LBA 23:16 #1F5/#FDBE
+idePort1F6	db 0		;CHS номер головки/LBA 27:24 #1F6/#FEBE
+				; 4,=0/1 текущий винчестер master/slave
+				; 5,=1 всегда
+				; 6,=0/1 это CHS/LBA адрес
+				; 7,=1 всегда
+idePort1F7r	db #20		;регистр команд (чтение сектора)
+idePort1F7w	db #30		;регистр команд (запись сектора)
+idePort1F7i	db #90		;регистр команд (идентификация)
+idePortErrCnt	db #01		;количество попыток чтения/записи сектора
+AdrLBA32	ifused
+		 dd 0		;LBA32 номер сектора
+		endif
+
+;------------------------------------------------------------------------------
+;код ошибки
+ideError	db 0
+
+;==============================================================================

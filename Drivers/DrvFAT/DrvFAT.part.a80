@@ -1,0 +1,131 @@
+;Процедуры  FAT Driver. Работа с разделами
+;файл DrvFAT.part.a80
+;
+;FindMFSorFAT		определение наличия хоть одного раздела MFS/FAT32 на текущем винчестере
+;GetAdrMFSorFAT		поиск раздела MFS/FAT32 по номеру
+;
+;------------------------------------------------------------------------------
+FindMFSorFAT	ifused
+;определение наличия хоть одного раздела MFS/FAT32 на текущем винчестере
+;  MFS только для ПрофПЗУ
+;вых: cy=1 раздел не найден
+;       a=errRWnum
+;       a=errPartNotFound
+;     cy=0 раздел найден
+;        a - код типа раздела
+;FindMFSorFAT
+;
+	push	ix
+	call	SetZeroDEHL
+	SetNumSectors_1		;число передаваемых секторов данных при операциях чтения/записи (=#00->=#100)
+	ReadSecMBR		;чтение нулевого сектора с винчестера в буфер Buf4MBR
+	ld	a,errRWnum
+	jr	c,goto036	;ошибка чтения
+
+;поиск раздела MFS/FAT32 в MBR
+	ld	hl,(Buf4MBR+#1FE)
+	ld	de,#AA55	;сигнатура (55h AAh)
+	or	a
+	sbc	hl,de
+	jr	nz,goto036	;сигнатура отсутствует: MBR отсутствует
+	ld	b,#04
+	ld	ix,Buf4MBR+#1BE	;начало дескрипторов разделов HDD
+loop012	ld	a,(ix+#04)	;код типа раздела
+	ifdef	withMFS
+	cp	#53		;это MFS
+	jr	z,goto037
+	endif
+	cp	#0B
+	jr	z,goto037
+	cp	#0C
+	jr	z,goto037
+	ld	de,#0010
+	add	ix,de		;дескриптор следующего раздела
+	djnz	loop012
+goto036	ld	a,errPartNotFound
+goto035	scf
+goto037	pop	ix
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+GetAdrMFSorFAT	ifused
+;поиск раздела MFS/FAT32 по номеру
+;вх:  l - номер раздела
+;вых: cy=1 ошибки чтения/записи, либо раздел не найден
+;       a=errRWnum
+;       a=errPartNotFound
+;       a=errInvalidPart
+;     cy=0 раздел найден
+;       a =#53 раздел MFS (только для ПрофПЗУ)
+;         =#0B FAT32
+;         =#0C FAT32 (LBA)
+;       bc - адрес дескриптора раздела в буфере
+;       dehl - смещение первого сектора раздела
+;
+;GetAdrMFSorFAT
+;
+;установим винчестер
+	push	ix
+	push	hl
+
+;установка винчестера согласно номеру раздела	
+	ld	a,l
+	SetHDDpart
+	ld	a,errHddNotFound
+	jr	c,goto031	;винчестер отсутствует
+
+;чтение сектора MBR
+	call	SetZeroDEHL	;hl=de=#0000 (нулевой сектор)
+	SetNumSectors_1		;число передаваемых секторов данных при операциях чтения/записи (=#00->=#100)
+	ReadSecMBR		;чтение нулевого сектора с винчестера в буфер Buf4MBR
+	ld	a,errRWnum
+	jr	c,goto031	;ошибка чтения
+
+;поиск раздела MFS/FAT32 в MBR
+	ld	hl,(Buf4MBR+#1FE)
+	ld	de,#AA55	;сигнатура (55h AAh)
+	or	a
+	sbc	hl,de
+	jr	nz,goto032	;сигнатура отсутствует: MBR отсутствует
+	pop	hl
+	ld	a,l
+	and	#03
+	ld	l,a
+	ld	h,#00
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	ex	de,hl
+	ld	ix,Buf4MBR+#1BE	;начало дескрипторов разделов HDD
+	add	ix,de
+	ld	a,(ix+#04)
+	IFDEF	withMFS
+	 cp	#53		;код типа раздела MFS
+	 jr	z,goto033
+	ENDIF
+	cp	#0B
+	jr	z,goto033
+	cp	#0C
+	jr	z,goto033
+	ld	a,errInvalidPart
+	jr	goto034		;раздел не найден
+goto033	ld	l,(ix+#08)
+	ld	h,(ix+#09)
+	ld	e,(ix+#0A)
+	ld	d,(ix+#0B)	;dehl - смещение первого сектора радела
+	push	ix
+	pop	bc
+	pop	ix
+	ret
+goto032	ld	a,errPartNotFound;сообщение: partition not found 
+goto031	pop	hl
+goto034	pop	ix
+	scf
+	ret
+
+	endif
+
+;==============================================================================

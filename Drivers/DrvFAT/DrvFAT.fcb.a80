@@ -1,0 +1,553 @@
+;Процедуры  FAT Driver. Работа с буфером fcb
+;файл DrvFAT.fcb.a80
+;
+;fcbRenameEntry		переименование записи в каталоге
+;fcbWriteToEntry	запись измененного fcb в каталог
+;fcbFindEntry		поиск записи в каталоге с сохранением текущего кластера
+;			и раздела в fcb
+;--fcbSetInEntryClsSize	установка в дескрипторе файла адреса первого кластера и
+;			размера из fcb
+;fcbSetEntryFromFcb	установка в дескрипторе файла имени, атрибутов, адреса
+;			первого кластера и размера из fcb
+;fcbExxCLSCurrDir	временная установка(обмен) из fcb буфера адреса
+;			текущего каталога и текущего раздела
+;fcbSetCLSCurrDir	установка в fcb адреса кластера каталога-родителя
+;fcbSetFromEntry	установка fcb буфера на основании дескриптора файла
+;fcbClsFile2fcbClsDIR	копирование поля fcbClsFile в поле fcbClsDIR
+;add2OffsetEOF_L	приращение указателя в файле с контролем выхода за
+;			пределы файла
+;add2OffsetEOF_HL	приращение указателя в файле с контролем выхода за
+;			пределы файла
+;add2OffsetEOF_EHL	приращение указателя в файле с контролем выхода за
+;			пределы файла
+;add2OffsetEOF_DEHL	приращение указателя в файле с контролем выхода за
+;			пределы файла
+;DEHL2fcbOffset_EoF	загрузка в fcbOffset указателя в файле из dehl
+;			с контролем выхода за пределы файла
+;DEHL2fcbOffset		загрузка в fcbOffset указателя в файле
+;DEHL2fcbClsDIR		загрузка в fcbClsDIR номера первого кластера каталога
+;			с файлом
+;DEHL2fcbSize		загрузка в fcbSize размера файла в байтах из dehl
+;DEHL2fcbClsFile	загрузка в fcbClsFile номера первого кластера из dehl
+;LD_DEHL_fcbOffset	загрузка в dehl поля fcbOffset из fcb
+;LD_DEHL_fcbSize	загрузка в dehl поля fcbSize из fcb
+;LD_DEHL_fcbClsFile	загрузка в dehl номера первого кластера файла из fcb
+;
+;------------------------------------------------------------------------------
+fcbRenameEntry	ifused
+;переименование записи в каталоге
+;  в fcb должны быть установлены: fcbName, fcbExt
+;вх:  ix - адрес fcb буфера с изменяемой записью каталога
+;     hl - адрес нового имени записи asciz в формате 8+3 или 8.3
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errFileNotFound
+;
+;fcbRenameEntry
+;
+;ищем запись в каталоге
+	push	ix
+	ex	(sp),hl
+	call	fcbFindEntry
+	jr	c,goto136
+
+;запись найдена
+	ex	de,hl
+	ex	(sp),hl
+	push	hl
+	call	FileNameTo8dot3		;установим новое имя в fcb буфере
+	pop	hl
+	pop	de
+	call	FileNameTo8dot3		;установим новое имя в дескрипторе
+	jr	goto137			;запись сектора на винчестер из буфера Buf4DIR
+
+;выход
+goto136	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbWriteToEntry	ifused
+;запись измененного fcb в каталог
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbAttr, fcbClsFile, fcbSize)
+;вх:  ix - адрес fcb буфера с изменяемой записью каталога
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errFileNotFound
+;
+;fcbWriteToEntry
+;
+;ищем запись в каталоге
+	push	ix
+	pop	hl
+	call	fcbFindEntry
+	ret	c
+
+;запись найдена
+	call	fcbSetEntryFromFcb	;установим параметры в дескриптор
+goto137	jp	SaveSecBuf2DIR		;запись сектора на винчестер из буфера Buf4DIR
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbFindEntry	ifused
+;поиск записи в каталоге с сохранением текущего кластера и раздела в fcb
+;  в fcb должны быть установлены: fcbName, fcbExt
+;вх:  ix - адрес fcb буфера
+;     hl - адрес имени файла asciz в формате 8+3 или 8.3
+;вых: cy=1 ошибка чтения/записи, запись не найдена
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;	a=errFileNotFound
+;     cy=0 запись найдена (fcb не заполняется!!!)
+;       de - адрес дескриптора в буфере
+;       bc - номер записи в каталоге
+;     hl - не меняется
+;
+;fcbFindEntry
+;
+	push	hl
+	call	fcbExxCLSCurrDir
+	call	fatFindEntryDir
+	pop	hl
+	jr	c,goto101
+	jr	z,goto101
+	scf
+	ld	a,errFileNotFound
+
+;выход
+goto101	push	af
+	call	fcbExxCLSCurrDir
+	pop	af
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbSetEntryFromFcb	ifused
+;установка в дескрипторе файла имени, атрибутов, адреса первого кластера
+;  и размера из fcb
+;вх:  ix - адрес fcb буфера
+;     de - адрес дескриптора в буфере
+;вых: bc=#0000
+;
+;fcbSetEntryFromFcb
+;
+;установим имя и атрибуты
+	push	ix
+	pop	hl
+	ld	bc,#000C
+	ldir
+
+;установим номер первого кластера
+	ex	de,hl
+	ld	c,#0E
+	add	hl,bc		;nc (иначе быть не может)
+	ex	de,hl		;de +#1A
+	ldi			;младшее слово кластера
+	ldi
+	ex	de,hl
+	ld	c,#08
+	sbc	hl,bc
+	ex	de,hl		;de +#14
+	ldi			;старшее слово кластера
+	ldi
+	ex	de,hl
+	ld	c,#06
+	add	hl,bc	
+	ex	de,hl		;de +#1C
+	ld	c,#04
+	add	hl,bc	
+	ldir			;размер
+
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbExxCLSCurrDir	ifused
+;временная установка(обмен) из fcb буфера адреса текущего каталога  и текущего
+;  раздела
+;вх:  ix - адрес fcb буфера
+;вых: hl,de,bc - не меняются
+;
+;fcbExxCLSCurrDir
+;
+	push	hl
+	push	de
+	push	bc
+	ld	a,(CurrentLevel)
+	push	af
+	ld	hl,PartitionNum
+	ld	c,(hl)
+	ld	(ix+fcbStore),c
+	ld	a,(ix+fcbPart)
+	ld	(hl),a
+	ld	(ix+fcbPart),c
+	call	InitFAT32
+	pop	af
+	ld	(CurrentLevel),a
+
+	push	ix
+	pop	hl
+	ld	de,fcbClsDIR
+	add	hl,de
+	call	excngCLSCurrDir
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbSetCLSCurrDir	ifused
+;установка в fcb адреса кластера каталога-родителя
+;вх:  ix - адрес fcb буфера
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errFileNotFound
+;
+;fcbSetCLSCurrDir
+;
+	push	de
+	push	hl
+	jr	goto175
+	jr	fcbSetFromEntry
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbSetFromEntry	ifused
+;установка fcb буфера на основании дескриптора файла
+;вх:  ix - адрес fcb буфера
+;     hl - адрес дескриптора файла
+;     (CLS_CurrDir) кластер каталога с файлом
+;вых: hl - адрес дескриптора файла
+;
+;fcbSetFromEntry
+;
+	push	de
+	push	hl
+	push	af
+
+;имя файла и атрибуты
+	push	ix
+	pop	de
+	ld	bc,#000C
+	ldir
+
+;номер первого кластера
+	ld	c,#08
+	add	hl,bc		;адрес номера кластера (hi)
+	push	hl
+	ld	c,#08
+	add	hl,bc		;адрес размера файла
+	ex	(sp),hl
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	ld	c,#05
+	add	hl,bc
+	ld	a,(hl)
+	inc	hl
+	ld	h,(hl)
+	ld	l,a
+	call	DEHL2fcbClsFile
+	pop	hl		;адрес размера файла
+
+;размер файла
+	call	LD_DEHL_adrHL
+	call	DEHL2fcbSize
+
+;указатель в файле =#00000000
+	call	SetZeroDEHL
+	call	DEHL2fcbOffset
+
+;номер текущего винчестера и раздела на нем
+	ld	a,(PartitionNum)
+	ld	(ix+fcbPart),a
+
+	pop	af
+
+;номер кластера каталога
+goto175	ld	de,(CLS_CurrDir+2)
+	ld	hl,(CLS_CurrDir)
+	call	DEHL2fcbClsDIR
+
+	pop	hl
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fcbClsFile2fcbClsDIR	ifused
+;копирование поля fcbClsFile в поле cbClsDIR
+;вх:  ix - адрес fcb буфера
+;
+;fcbClsFile2fcbClsDIR
+;
+	push	ix
+	pop	hl
+	ld	de,fcbClsFile
+	add	hl,de
+	ex	de,hl
+	ld	l,fcbClsDIR-fcbClsFile
+	add	hl,de
+	ex	de,hl
+	jp	CopyDWORD_HL_DE
+
+	endif
+
+;------------------------------------------------------------------------------
+;приращение указателя в файле
+;вх:  ix - адрес fcb буфера
+;вх:  [d][e][h]l - величина приращения
+;вых: cy=0 указатель установлен
+;       dehl - указатель
+;
+add2Offset_L	ifused
+;
+	ld	h,#00
+	jr	add2Offset_HL
+	org	$-2
+	endif
+
+add2Offset_HL	ifused
+;
+	ld	e,#00
+	jr	add2Offset_EHL
+	org	$-2
+	endif
+
+
+add2Offset_EHL	ifused
+;
+	ld	d,#00
+	jr	add2Offset_DEHL
+	org	$-2
+	endif
+
+
+add2Offset_DEHL	ifused
+;
+	push	bc
+	push	de
+	push	hl
+	call	LD_DEHL_fcbOffset
+	pop	bc
+	add	hl,bc
+	pop	bc
+	ex	de,hl
+	adc	hl,bc
+	ex	de,hl
+	pop	bc
+	jr	DEHL2fcbOffset
+
+	endif
+
+;------------------------------------------------------------------------------
+;приращение указателя в файле с контролем выхода за пределы файла
+;вх:  ix - адрес fcb буфера
+;вх:  [d][e][h]l - величина приращения
+;вых: cy=1 указатель был вне пределов файла -> установлен в начало
+;       dehl =#00000000
+;     cy=0 указатель установлен
+;       dehl - указатель
+;
+add2OffsetEOF_L		ifused
+;
+	ld	h,#00
+	jr	add2OffsetEOF_HL
+	org	$-2
+	endif
+
+add2OffsetEOF_HL	ifused
+;
+	ld	e,#00
+	jr	add2OffsetEOF_EHL
+	org	$-2
+	endif
+
+
+add2OffsetEOF_EHL	ifused
+;
+	ld	d,#00
+	jr	add2OffsetEOF_DEHL
+	org	$-2
+	endif
+
+
+add2OffsetEOF_DEHL	ifused
+;
+	push	bc
+	push	de
+	push	hl
+	call	LD_DEHL_fcbOffset
+	pop	bc
+	add	hl,bc
+	pop	bc
+	ex	de,hl
+	adc	hl,bc
+	ex	de,hl
+	pop	bc
+	jr	DEHL2fcbOffset_EoF
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+DEHL2fcbOffset_EoF	ifused
+;загрузка в fcbOffset указателя в файле из dehl с контролем выхода за пределы
+;  файла
+;вх:  ix - адрес fcb буфера
+;     dehl - указатель в файле
+;вых: cy=1 указатель был вне пределов файла -> установлен в начало
+;       dehl =#00000000
+;     cy=0 указатель установлен
+;       dehl - указатель
+;
+;DEHL2fcbOffset_EoF
+;
+	push	bc
+	push	ix
+	ex	(sp),hl
+	ld	bc,fcbSize
+	add	hl,bc
+	ld	c,l
+	ld	b,h
+	pop	hl
+	call	cmp_DEHL_adrBC
+	pop	bc
+	jr	c,goto096
+	jr	nz,DEHL2fcbOffset
+        scf
+goto096	call	SetZeroDEHL
+
+	endif
+
+;------------------------------------------------------------------------------
+DEHL2fcbOffset	ifused
+;загрузка в fcbOffset загрузка в fcbOffset указателя в файле
+;вх:  ix - адрес fcb буфера
+;     dehl - указатель в файле
+;
+;DEHL2fcbOffset
+;
+	ld	(ix+fcbOffset),l
+	ld	(ix+fcbOffset+1),h
+	ld	(ix+fcbOffset+2),e
+	ld	(ix+fcbOffset+3),d
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+DEHL2fcbClsDIR	ifused
+;загрузка в fcbClsDIR номера первого кластера каталога с файлом
+;вх:  ix - адрес fcb буфера
+;     dehl - номер кластера каталога
+;
+;DEHL2fcbClsDIR
+;
+	ld	(ix+fcbClsDIR),l
+	ld	(ix+fcbClsDIR+1),h
+	ld	(ix+fcbClsDIR+2),e
+	ld	(ix+fcbClsDIR+3),d
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+DEHL2fcbSize	ifused
+;загрузка в fcbSize размера файла в байтах из dehl
+;вх:  ix - адрес fcb буфера
+;     dehl - размер файла
+;
+;DEHL2fcbSize
+;
+	ld	(ix+fcbSize),l
+	ld	(ix+fcbSize+1),h
+	ld	(ix+fcbSize+2),e
+	ld	(ix+fcbSize+3),d
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+DEHL2fcbClsFile	ifused
+;загрузка в fcbClsFile номера первого кластера из dehl
+;вх:  ix - адрес fcb буфера
+;     dehl - номер первого кластера файла
+;
+;DEHL2fcbClsFile
+;
+	ld	(ix+fcbClsFile),l
+	ld	(ix+fcbClsFile+1),h
+	ld	(ix+fcbClsFile+2),e
+	ld	(ix+fcbClsFile+3),d
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+LD_DEHL_fcbOffset	ifused
+;загрузка в dehl поля fcbOffset из fcb
+;вх:  ix - адрес fcb буфера
+;вых: dehl - указатель в файле
+;
+;LD_DEHL_fcbOffset
+;
+	ld	de,fcbOffset
+	jr	goto044
+	jr	LD_DEHL_fcbClsFile
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+LD_DEHL_fcbSize	ifused
+;загрузка в dehl поля fcbSize из fcb
+;вх:  ix - адрес fcb буфера
+;вых: dehl - размер файла в байтах
+;
+;LD_DEHL_fcbSize
+;
+	ld	de,fcbSize
+	jr	goto044
+	jr	LD_DEHL_fcbClsFile
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+LD_DEHL_fcbClsFile	ifused
+;загрузка в dehl номера первого кластера файла из fcb
+;вх:  ix - адрес fcb буфера
+;вых: dehl - номер первого кластера файла
+;
+;LD_DEHL_fcbClsFile
+;
+	ld	de,fcbClsFile
+goto044	push	ix
+	pop	hl
+	add	hl,de
+	jp	LD_DEHL_adrHL
+
+	endif
+
+;==============================================================================

@@ -1,0 +1,83 @@
+;Переменные FAT Driver
+;файл DrvFAT.var.a80
+;
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	ifdef	VarsInDrv
+VarsFAT	ds	#5B
+	else
+
+;переменные текущего FAT32 раздела
+CurrentPart	equ VarsFAT+#00	;1 bit 1-0, номер проиницилизированного раздела FAT
+                                ;  bit 3-2, номер устройства
+				;           =00 HDD master
+				;           =01 HDD slave
+				;           =10 SD card
+FlgFAT		equ VarsFAT+#01	;1 флаги
+				;  0,=1 NextFreeCluster был установлен в #FF
+AdrPartBegin	equ VarsFAT+#02	;4 адрес начала раздела
+AdrFsInfo	equ VarsFAT+#06	;2 смещение сектора FSInfo от начала раздела
+AdrFATonHDD	equ VarsFAT+#08	;4 начало первой FAT-таблицы
+AdrDataBegin	equ VarsFAT+#0C	;4 адрес первого сектора данных раздела от BPB
+				;  (смещение от начала раздела)
+LenOfPartFAT	equ VarsFAT+#10	;4 количество секторов на разделе
+LenFATinSec	equ VarsFAT+#14	;4 количество секторов занимаемых одной FAT
+NumsFATonPart	equ VarsFAT+#18	;1 количество копий FAT на текущем разделе
+LenCLSInSec	equ VarsFAT+#19	;1 размер кластера в секторах
+RootClaster	equ VarsFAT+#1A	;4 номер первого кластера коневого каталога
+FsIFreeCls	equ VarsFAT+#1E	;4 число свободных кластеров
+				;  =#FFFFFFFF неизвестно
+FsINextCls	equ VarsFAT+#22	;4 номер кластера с которого надо искать
+				;  свободные кластеры
+				;  =#FFFFFFFF неизвестно
+
+
+;переменные для работы с FAT
+@CurrentLevel	equ VarsFAT+#26	;1 глубина пути к текущему каталогу
+@CLS_CurrDir	equ VarsFAT+#27	;4 первый кластер текущей директории
+tmpDIR		equ VarsFAT+#2B	;4 первый кластер временной директории
+@DescInCurrDir	equ VarsFAT+#2F	;2 номер текущей записи в каталоге
+@DescInDIR	equ VarsFAT+#31	;2 количество записей в текущем каталоге
+@Ext4Found	equ VarsFAT+#33	;2 адрес списка расширений для отображения
+@SecFATinBuf	equ VarsFAT+#35	;4 номер сектора FAT, загруженного
+				;  в буфер Buf4FAT
+@SecDIRinBuf	equ VarsFAT+#39	;4 номер сектора каталога, загруженного
+				;  в буфер Buf4DIR
+
+
+;для ускорения чтения файла
+NumFstCluster	equ VarsFAT+#3D	;4 номер первого кластера текущего файла
+NumCluster	equ VarsFAT+#41	;2 порядковый номер кластера с предыдущим
+				;  прочитанным сектором текущего файла
+NumSecCls	equ VarsFAT+#43	;1 порядковый номер сектора в кластере
+				;  предыдущий прочитанный сектор которого в
+				;  буфере
+SecFileInBuf	equ VarsFAT+#44	;4 номер сектора файла, загруженного в буфер
+
+;для временного хранения переменных
+tmpDWORD	equ VarsFAT+#48	;4 временная переменная для различных нужд
+				;  используется в процедурах:
+				;  CountFreeCls
+				;  SetNClsInFAT
+				;  AddCls2Chain
+				;  FreeClsChain
+				;  FindFreeCls
+				;  fatAddFreeSpace_dehl
+				;  fatAddFreeSpace_var
+				;  addFileFreeSpace
+				;  findFreeDirEntry
+				;  fatFormatPart
+tmpDWORD2	equ VarsFAT+#4C	;+4 временная переменная для различных нужд
+				;  используется в процедурах:
+				;  fatAddFreeSpace
+@Name4Find	equ VarsFAT+#50	;11 имя файла FAT для поиска в каталоге
+
+	endif
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;для сортировки имен файлов/каталогов
+	ifused	Sym4Sort
+Sym4Sort	db ".!#$%&'()-0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`{}~",#7F
+		db "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ",#FF,0
+	endif
+
+;------------------------------------------------------------------------------

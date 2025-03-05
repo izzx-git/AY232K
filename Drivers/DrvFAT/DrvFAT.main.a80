@@ -1,0 +1,143 @@
+;Драйвер  FAT32
+;FAT Driver v1.00
+;(c) 2022-2024 LW aka PLM
+;
+;Date Creating: 14.12.2022
+;Last   Update: 08.09.2024
+;Last  Edition: 08.09.2024
+;
+;Файлы:
+;DrvFAT.main.a80	- этот файл
+;DrvFAT.LFN.a80		- работа с длинными именами
+;DrvFAT.rst.a80		- обработка запросов пользователя
+;DrvFAT.format.a80	- создание и форматирование раздела
+;DrvFAT.dir.a80		- работа с каталогами
+;DrvFAT.file.a80	- работа с файлами и каталогами
+;DrvFAT.fcb.a80		- работа с буфером fcb
+;DrvFAT.init.a80	- инициализация переменных FAT32 раздела
+;DrvFAT.part.a80	- работа с разделами
+;DrvFAT.table.a80	- процедуры для работы с таблицей FAT
+;DrvFAT.str.a80		- для работы со строками
+;DrvFAT.misc.a80	- процедуры общего назначения
+;DrvFAT.var.a80		- переменные
+;DrvFAT.info		- информация о драйвере
+;DrvFAT.lua.a80		- LUA
+;
+;------------------------------------------------------------------------------
+;ключи компиляции
+	DEVICE 	ZXSPECTRUM128
+	INCLUDE "DrvFAT.lua.a80"
+	INCLUDE "DrvHDD.Project.mac"
+;	PAGE	#00
+	MODULE	DrvFAT
+
+;------------------------------------------------------------------------------
+;Условия трансляции 
+
+;	DEFINE	forProfROM	;сборка для ПрофПзу
+;	DEFINE	forRRL		;сборка для ResetRomLoader
+	DEFINE	withMFS		;с поддержкой MFS
+;	DEFINE	VarsInDrv	;переменные находятся в составе драйвера
+;	DEFINE	FAT_SIZE_32	;поддержка только FAT32 (не реализовано)
+
+;------------------------------------------------------------------------------
+;Константы драйвера
+
+;Адрес ассемблирования:
+AdrDrvBegin	equ $
+
+	ifndef	VarsInDrv
+VarsFAT	equ	_VarsFAT;адрес блока переменных
+	endif
+
+LenEntryLFN	equ #0D	;количество символов в дескрипторе LongName
+fnSep		equ "/" ;основной разделитель в пути (на него будут заменяться все)
+fnSep1		equ "/" ;возможный разделитель в пути
+fnSep2		equ #5C ;возможный разделитель в пути
+
+;Коды ошибок
+errOK		equ #00
+errNumTooBig	equ #11 ;number too big
+@errInvFileName	equ #45 ;invalid file name
+errFileNotFound	equ #48 ;file not found
+errDiskNoSpace	equ #49	;disk no space
+errRWnum	equ #50 ;R/W error _число_
+errHddNotFound	equ #56 ;hard disk not found
+errHddRWerror	equ #57 ;hard disk R/W error #nnnn
+errHddBusy	equ #60 ;busy not found
+errHddNotReady	equ #61 ;hard disk not ready
+errHddNotData	equ #62 ;hard disk data not ready
+errInvPartMg	equ #63 ;invalid partition manager
+errPartNotFound	equ #66 ;partition not found
+errInvalidPart	equ #6D ;invalid partition
+errInvalidFile	equ #70 ;invalid file
+errEoF		equ #71 ;end of file
+errPathEmpty	equ #72 ;path empty
+errFileExist	equ #73 ;file exist
+errDirNotEmpty	equ #74 ;dir not empty
+errFileEmpty	equ #75 ;file empty
+errAccesDenied	equ #79 ;acces denied
+errCopyItself	equ #7A ;copy to itself
+
+;смещения в блоке fcb
+fcbName		equ #00 ;8 имя файла
+fcbExt		equ #08 ;3 расширение файла
+fcbAttr		equ #0B ;1 атрибуты файла
+fcbClsFile	equ #0C ;4 номер первого кластера файла/каталога
+fcbClsDIR	equ #10 ;4 номер первого кластера каталога с этим файлом/каталогом
+fcbSize		equ #14 ;4 размер файла/каталога в байтах
+fcbOffset	equ #18 ;4 указатель в файле
+fcbStore	equ #1C	;1 для внутренних нужд
+fcbStore2	equ #1D ;1 резерв
+fcbType		equ #1E ;1 bit 3,=0/1 имя SFN/LFN
+			;  bit 4,=0/1 это файл/каталог
+fcbPart		equ #1F ;1 номер текущего винчестера и раздела на нем
+
+;смещения в блоке BPB 
+BPB_BytesPerSec		equ #0B	;2 количество байт в секторе
+BPB_SecPerClus		equ #0D	;1 количество секторов в кластере
+BPB_RsvdSecCnt		equ #0E	;2 количество зарезервированных секторов
+BPB_NumFATs		equ #10	;1 количество FAT таблиц
+BPB_RootEntCnt		equ #11	;2 для FAT12/16 число 32-байтных элементов, для FAT32 = 0
+BPB_TotSec16		equ #13	;2 количество секторов на разделе
+BPB_FATSz16		equ #16	;2 Для FAT12/16 количество секторов одной FAT, для FAT32 = 0
+BPB_TotSec32		equ #20	;4 общее количество секторов на разделе
+BPB_FATSz32		equ #24	;4 количество секторов одной FAT таблицы
+BPB_RootClus		equ #2C	;4 номер первого кластера root директории
+BPB_FAT32_FsInfo	equ #30 ;2 Номер сектора структуры FSInfo в резервной области логического диска
+
+;различные буфера
+Buf4File	equ _Buf4File	;буфер для чтения файла
+Buf4MBR		equ _Buf4MBR	;буфер с сектором MBR
+Buf4LFN		equ _Buf4LFN	;буфер для создания записей с длинным именем
+Buf4Format	equ 0		;#600 буфер для форматирования раздела
+@Buf4Desc	equ 0		;#200 буфер для номеров дескрипторов в каталоге
+@Buf4FirstSym	equ 0		;#200 буфер для первых букв найденных дескрипторов
+Buf4DIR		equ _Buf4DIR	;#200 буфер для загрузки сектора DIR (каталога)
+Buf4FAT		equ _Buf4FAT	;#200 буфер для загрузки сектора FAT
+@Buf4SortDesc	equ 0		;временный буфер для сортировки FAT каталога
+@CurrentPath 	equ _CurrentPath;#100 буфер текущего пути
+				;+#00 - длина пути (последний байт пути =#00)
+@BufCurrentPath	equ 0		;#100 буфер текущего пути (для сохранения на винт)
+tmp_fcb		equ _tmp_fcb	;#20 для временного хранения fcb
+
+;------------------------------------------------------------------------------
+
+	ORG	AdrDrvBegin
+Start	
+	INCLUDE	"DrvFAT.LFN.a80"
+	INCLUDE	"DrvFAT.rst.a80"
+	INCLUDE	"DrvFAT.format.a80"
+	INCLUDE	"DrvFAT.dir.a80"
+	INCLUDE	"DrvFAT.file.a80"
+	INCLUDE	"DrvFAT.fcb.a80"
+	INCLUDE	"DrvFAT.init.a80"
+	INCLUDE	"DrvFAT.part.a80"
+	INCLUDE	"DrvFAT.table.a80"
+	INCLUDE	"DrvFAT.str.a80"
+	INCLUDE	"DrvFAT.misc.a80"
+	INCLUDE	"DrvFAT.var.a80"
+End	;SAVEBIN	"drvfat.bin",Start,End-Start
+	DISPLAY "Lenght DrvFAT = ",/A,End-Start
+
+	ENDMODULE

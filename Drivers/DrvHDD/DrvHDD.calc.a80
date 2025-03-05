@@ -1,0 +1,191 @@
+;Процедуры  HDD Driver. процедуры для математических расчетов
+;файл DrvHDD.calc.a80
+;
+;Pause70k		задержка 70k тактов
+;SetZeroDEHL		обнуление dehl
+;hddLBAtoCHS		преобразование адреса LBA в CHS
+;calcHLequEmulA		умножение: hl=e*a
+;altDEHLdivBC		деление de'hl'=de'hl'/bc
+;
+;------------------------------------------------------------------------------
+Pause70k	ifused
+;задержка 70k тактов
+;вых: bc=#0000
+;     a=#00
+;
+;Pause70k
+;
+	push	bc
+	ld	bc,2600
+loop050	dec	bc
+	ld	a,b
+	or	c
+	jr	nz,loop050
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SetZeroDEHL	ifused
+;обнуление dehl
+;вых: dehl=#00000000
+;
+;SetZeroDEHL
+;
+	ld	hl,#0000
+	ld	e,l
+	ld	d,l
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddLBAtoCHS	ifused
+;преобразование адреса LBA в CHS
+;вх:  dehl - LBA адрес сектора
+;вых: de - номер цилиндра CHS
+;     c - номер сектора CHS
+;     a - номер головки CHS
+;
+;hddLBAtoCHS
+;
+	exx
+	ld	bc,(devHmulS)		;head*sector (секторов на цилиндре)
+	call	altDEHLdivBC		;деление de'hl'=de'hl'/bc
+	exx
+	ld	a,d
+	or	e
+	jr	nz,goto038		;вне пределов CHS
+	ld	b,a			;b=#00
+	ex	de,hl
+	ld	hl,(devCylinders)
+	sbc	hl,de
+	jr	c,goto038		;вне пределов CHS
+	push	de			;номер цилиндра CHS
+	ld	a,(devSectors)
+	ld	c,a			;bc - значение sector HDD
+	push	af
+	call	altDEHLdivBC		;деление de'hl'=de'hl'/bc
+	pop	af
+	pop	de
+	inc	l
+	cp	l	
+	jr	c,goto038		;вне пределов CHS
+	ld	a,l			;номер сектора CHS
+	exx
+	ld	c,a
+	ld	a,(devHeads)
+	cp	l
+	ld	a,l			;номер головки CHS
+	ret	nc			;параметры в пределах CHS
+
+;вне пределов CHS, ставим максимальные значения
+goto038	ld	de,(devCylinders)
+	ld	hl,(devHeads)
+	ld	a,l
+	ld	c,h
+	dec	de
+	dec	l
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+calcHLequEmulA	ifused
+;умножение: hl=e*a
+;вх:  a,e - числа
+;вых: hl=e*a
+;     d,b =#00
+;
+;calcHLequEmulA
+;
+        ld      h,a
+        ld      l,#00
+        ld      d,l
+        ld      b,#08
+loop026 add     hl,hl
+        jr      nc,goto028
+        add     hl,de
+goto028 djnz    loop026
+        ret
+
+        endif
+
+;------------------------------------------------------------------------------
+altDEHLdivBC	ifused
+;деление de'hl'=de'hl'/bc
+;вх:  de'hl' - делимое
+;     bc - делитель
+;вых: de'hl' - значение
+;     hl остаток от деления
+;
+;altDEHLdivBC
+;
+	ld	hl,#0000
+	push	hl
+	ld	e,l
+	ld	d,h
+	exx
+	ld	b,#20
+loop028	xor	a
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	exx
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	rla
+	or	a
+	sbc	hl,bc
+	ex	(sp),hl
+	ex	de,hl
+	sbc	hl,de
+	ex	de,hl
+	ex	(sp),hl
+	exx	
+	sbc	a,#00
+	jr	nz,goto033
+loop029	inc	l
+	djnz	loop028
+	inc	sp
+	inc	sp
+	exx
+	ret
+loop027	xor	a
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	exx
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	rla
+	add	hl,bc
+	ex	(sp),hl
+	ex	de,hl
+	adc	hl,de
+	ex	de,hl
+	ex	(sp),hl
+	exx	
+	sbc	a,#00
+	jr	z,loop029
+goto033	djnz	loop027
+	exx
+	add	hl,bc
+	jr	nc,goto034
+	inc	de
+goto034	inc	sp
+	inc	sp
+	ret
+
+	endif
+
+;==============================================================================
+;ПЕРЕМЕННЫЕ
+;==============================================================================

@@ -1,0 +1,1216 @@
+;Процедуры  FAT Driver. Работа с файлами и каталогами
+;файл DrvFAT.file.a80
+;
+;addBytesToFile		увеличение размера файла на заданное количество байт
+;fatCreateFile		создание файла в текущем FAT32 разделе
+;fatCreateFileLFN	создание файла с длинным именем в текущем FAT32 разделе
+;fatAddFileEntry	добавление в каталог записи с длинным/коротким именем файла
+;addFileEntrysLFN	добавление в каталог записей с длинным именем файла
+;addFileEntry		добавление в каталог файла
+;findFreeDirEntry	поиск пустой записи в каталоге
+;newFileFreeSpace	создание цепочки кластеров с заданным количеством байт
+;addFileFreeSpace	добавление заданного количества байт к цепочке кластеров
+;fatAddFreeSpace_var	добавление в цепочку кластеров заданного количества
+;			кластеров
+;fatAddFreeSpace_dehl	добавление в цепочку кластеров заданного количества
+;			кластеров
+;WriteSectorHDD		запись сектора на винчестер
+;ReadSectorHDD		чтение сектора с винчестера
+;CalcAdrSecInMountFile	расчет LBA номера сектора на винчестере в примонтированном файле (.trd)
+;CalcAdrSecInFile	расчет LBA номера сектора файла на винчестере
+;FindCLSinFile		Поиск номера кластера по смещению от начала файла/каталога
+;
+;------------------------------------------------------------------------------
+addBytesToFile	ifused
+;увеличение размера файла на заданное количество байт
+;вх:  ix - адрес буфера fcb
+;     dehl - величина в байтах, на которую надо увеличить размер файла
+;вых: cy=1 ошибки
+;        a=errNumTooBig - слишком большой размер, более #FFFF кластеров
+;        a=errRWnum - код ошибки
+;        a=errFileEmpty - нулевой размер файла
+;        a=errDiskNoSpace
+;        a=errInvalidPart
+;        a=errEoF - файл прервался
+;        a=errFileNotFound
+;
+;addBytesToFile
+;
+;рассчитаем свободное место в последнем кластере файла
+	push	de
+	push	hl
+	call	LD_DEHL_fcbSize
+	call	sizeBytes2Cls	;bc количество байт в последнем кластере файла
+	jr	nc,goto097
+	jp	nz,goto104	;слишком много кластеров добавляем
+;  файл пустой, добавляем весь размер
+;	call	FindFreeClsRoot
+	call	FindFreeClsFSinfo
+	jp	c,goto104
+ 	ld	a,errDiskNoSpace
+	jp	z,goto104
+	call	DEHL2fcbClsFile
+	pop	hl
+	pop	de
+	push	de
+	push	hl
+	call	newFileFreeSpace
+	jr	nc,goto098	;кластеры добавили успешно
+	cp	errDiskNoSpace
+	jr	nz,goto104
+	call	FreeClsChain	;освобождение ранее занятой цепочки
+	call	SetZeroDEHL
+	call	DEHL2fcbClsFile
+	jr	goto103
+;  расчитаем незанятое местов последнем кластере файла
+goto097	ld	a,b
+	or	c
+;	jr	z,goto098	;в последнем кластере места нет
+	jr	z,goto177	;в последнем кластере места нет
+	ld	a,(LenCLSInSec)
+	ld	h,a
+	ld	l,#00
+	add	hl,hl		;hl размер кластера в байтах 0=65536
+	or	a
+	sbc	hl,bc		;hl свободное место в последнем кластере файла
+	ld	b,h
+	ld	c,l		;bc свободное место в последнем кластере файла
+goto177	pop	hl
+	pop	de
+
+;проверим надо ли добавлять кластер
+	push	de
+	push	hl
+	or	a
+	sbc	hl,bc
+	jr	nc,goto099
+	dec	de
+goto099	ld	a,d
+	and	e
+	inc	a
+	jr	z,goto098	;добавлять кластеры не надо
+	ld	a,h
+	or	l
+	or	e
+	or	d
+	jr	z,goto098	;добавлять кластеры не надо
+;dehl величина в байтах, на которую надо фактически увеличить размер файла
+;     в кластерах
+
+;добавление цепочки кластеров к существующей цепочке
+;  рассчитаем сколько кластеров надо добавить
+	call	sizeBytes2Cls	;вычисление размера в кластерах
+	jr	c,goto104
+;  определим номер последнего кластера файла
+	push	hl
+	call	LD_DEHL_fcbClsFile
+loop041	push	hl
+	push	de
+	call	ReadFATnextCls	;dehl номер следующего кластера
+	jr	c,goto102
+	call	TestLastCLS
+	jr	c,goto100
+	pop	bc
+	pop	bc
+	jr	loop041
+goto100	pop	de
+	pop	hl		;dehl номер последнего кластера
+	pop	bc		;bc добавляемое количество кластеров
+;  добавляем цепочку кластеров
+	push	de
+	push	hl
+	call	fatAddFreeSpace_dehl
+	pop	hl
+	pop	de
+	jr	nc,goto098	;ошибок не было
+	cp	errDiskNoSpace
+	jr	nz,goto104
+;  нет свободного места. освобождаем добавленную цепочку
+	push	de
+	push	hl
+	call	FreeClsChain	;освобождение ранее занятой цепочки
+	pop	hl
+	pop	de
+	call	SetLastClsInFAT
+	jr	goto103
+
+;изменение размер файла в записи в каталоге
+goto098 call	LD_DEHL_fcbSize
+	pop	bc
+	add	hl,bc
+	pop	bc
+	ex	de,hl
+	adc	hl,bc
+	ex	de,hl
+	call	DEHL2fcbSize
+;  запись изменений в каталог
+	jp	fcbWriteToEntry
+
+;выход по ошибке
+goto103	ld	a,errDiskNoSpace
+	jr	goto104
+goto102	pop	de
+	pop	de
+	pop	bc
+goto104	pop	hl
+	pop	de
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatCreateFile	ifused
+;создание файла в текущем FAT32 разделе
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType
+;  fcbSize
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errFileExist
+;       a=errDiskNoSpace
+;       a=errNumTooBig - слишком большой размер
+;       a=errInvFileName файл с таким именем существует/пустое имя
+;     cy=0 запись внесена в каталог
+;
+;fatCreateFile
+;
+	ld	hl,#0000
+	jr	fatCreateFileLFN
+	org	$-2
+	endif
+
+
+fatCreateFileLFN	ifused
+;создание файла с длинным именем в текущем FAT32 разделе
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType=1
+;  fcbSize
+;вх:  ix - адрес буфера fcb
+;     hl - адрес строки с длинным именем в формате ASCIIZ
+;       =#0000 использовать короткое имя из fcb
+;
+;fatCreateFileLFN
+;
+	push	hl
+	ld	a,h
+	or	l
+	jr	nz,goto172
+
+;проверка существования файла
+	push	ix
+	pop	hl
+	call	fatFindEntryDir
+;	call	fcbFindEntry		;поиск файла в каталоге
+	jr	c,error1		;ошибка
+	ld	a,errFileExist
+	jr	z,error1		;файл с таким именем существует
+
+;найдем свободный кластер
+goto172	call	FindFreeClsFSinfo
+;	call	FindFreeClsRoot
+	jr	c,error1		;ошибка
+	ld	a,errDiskNoSpace
+	jr	z,error1
+	call	DEHL2fcbClsFile
+
+;резервируем цепочку кластеров
+	bit	4,(ix+fcbType)
+	jr	z,goto072		;создаем файл
+;  создаем каталог размер 1 кластер
+	ld	hl,(LenCLSInSec)
+	ld	h,#00
+	ld	d,h
+	add	hl,hl
+	ld	e,h
+	ld	h,l
+	ld	l,d
+goto072	call	z,LD_DEHL_fcbSize
+	call	newFileFreeSpace
+	jr	nc,goto071
+	cp	errFileEmpty
+	jr	z,goto070		;задан нулевой размер файла
+	cp	errDiskNoSpace
+	jr	nz,error1
+goto069	push	af
+	call	LD_DEHL_fcbClsFile
+	call	FreeClsChain		;освобождение ранее занятой цепочки
+	pop	af
+error1	pop	hl
+	scf
+	ret
+;  файл нулевой длины
+goto070	ld	hl,#0000
+	ld	e,l
+	ld	d,l
+	call	DEHL2fcbClsFile
+
+;создаем запись в каталоге
+goto071	pop	hl
+	push	hl
+	call	fatAddFileEntry
+	jr	c,goto069
+	pop	hl
+	ret
+/*было
+	push	hl
+	ld	a,h
+	or	l
+	jr	z,goto173
+	call	addFileEntrysLFN
+	jr	goto174
+goto173	call	addFileEntry
+goto174	jr	c,goto069
+	pop	hl
+	ret
+*/
+	endif
+
+;------------------------------------------------------------------------------
+fatAddFileEntry	ifused
+;добавление в каталог записи с длинным/коротким именем файла
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType
+;  fcbClsFile, fcbSize
+;вх:  ix - адрес буфера fcb
+;     hl - адрес строки с длинным именем в формате ASCIIZ
+;       =#0000 файл с коротким именем из fcb (fcbName, fcbExt можно не устанавливать)
+;вых: в буфере fcb установлено имя и расширение на основе длинного имени
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errInvFileName файл с таким именем существует/пустое имя
+;       a=errDiskNoSpace
+;     cy=0 запись внесена в катлог
+;
+;fatAddFileEntry
+;
+	ld	a,h
+	or	l
+	jr	z,addFileEntry
+	jr	addFileEntrysLFN
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+addFileEntrysLFN	ifused
+;добавление в каталог записей с длинным именем файла
+;  основная запись с коротким именем тоже добавляется
+;  в fcb должны быть установлены: fcbClsDIR, bit4 fcbType, fcbClsFile, fcbSize
+;вх:  ix - адрес буфера fcb
+;     hl - адрес строки с длинным именем в формате ASCIIZ
+;вых: в буфере fcb установлено имя и расширение на основе длинного имени
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errInvFileName файл с таким именем существует/пустое имя
+;       a=errDiskNoSpace
+;     cy=0 запись внесена в катлог
+;
+;addFileEntrysLFN
+;
+;формирование короткого имени с проверкой существования файла
+	call	fatSetSFNname		;b=#00
+	ret	c
+
+;рассчитаем необходимое количество записей для длинного имени
+	push	hl
+	dec	b			;b=#FF
+loop063	ld	a,(hl)
+	inc	b
+	inc	hl
+	or	a
+	jr	nz,loop063
+	pop	de			;de - адрес строки с длинным именем
+	ld	a,b
+	or	a
+	ld	a,errInvFileName
+	scf
+	ret	z			;пустое имя
+	ld	a,b			;b - длина имени
+	ld	b,#FF
+	add	a,LenEntryLFN-1
+loop064	inc	b
+	sub	LenEntryLFN
+	jr	nc,loop064
+;de - адрес строки с длинным именем
+;b - количество записей для длинного имени (он же номер последней записи) [1..20]
+;c - контрольная сумма имени
+
+;установка дескрипторов длинного имени в буфере
+	push	bc
+	ld	hl,Buf4LFN
+	push	hl
+loop065	push	de
+	push	bc
+	dec	b
+	ld	a,b
+	add	a,a
+	add	a,a
+	ld	c,a
+	add	a,a
+	add	a,c
+	add	a,b			;a=b*13
+	add	a,e
+	ld	e,a
+	jr	nc,goto171
+	inc	d			;de адрес в строке с именем файла
+goto171	pop	bc
+;	inc	b
+	call	lfnSetOneEntry		;установка одной записи LFN
+;	pop	bc
+	pop	de
+	djnz	loop065
+	pop	hl
+	pop	bc
+;b - количество записей для длинного имени (он же номер последней записи) [1..20]
+;c - контрольная сумма имени
+;hl - адрес буфера с дескрипторами
+;de - адрес строки с длинным именем
+
+;запись дескрипторов с длинным именем на винчестер
+;  поиск первой пустой записи в каталоге (это будет последняя запись в каталоге)
+;    (удаленные записи должны игнорироваться)
+	set	6,(hl)
+loop066	push	bc
+	push	hl
+	call	findFreeDirEntry
+	jp	c,error2		;ошибка
+;  читаем сектор каталога
+;loop066	
+	push	bc
+	hddSetCurrSec			;установим адрес LBA для чтения
+	ld	hl,Buf4File
+	hddReadSec2HL			;прочитали сектор
+	pop	de			;адрес дескриптора в прочитанном секторе
+	jp	c,error2		;ошибка
+	add	hl,de
+	ex	de,hl			;адрес в секторе каталога
+	pop	hl
+	ld	bc,#0020
+	ldir
+	push	hl			;адрес следующего дескриптора
+;  запишем сектор каталога
+	ld	hl,Buf4File
+	hddWriteSecHL			;записали сектор
+	jp	c,error2		;ошибка
+	pop	hl
+	pop	bc
+	djnz	loop066
+
+;запишем основной дескриптор с коротким именем
+	jr	addFileEntry
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+addFileEntry	ifused
+;добавление в каталог файла
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType
+;  fcbClsFile, fcbSize
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 были ошибки. код ошибки в A
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errFileEmpty
+;       a=errDiskNoSpace
+;     cy=0 запись внесена в катлог
+;
+;addFileEntry
+;
+;поиск пустой записи в каталоге
+	call	findFreeDirEntry
+	ret	c		;ошибка
+
+;читаем сектор каталога
+	push	bc
+	hddSetCurrSec		;установим адрес LBA для чтения
+	ld	hl,Buf4File
+	hddReadSec2HL		;прочитали сектор
+	pop	bc
+	ret	c		;ошибка
+
+;заносим в сектор запись
+	add	hl,bc		;адрес записи в буфере
+	ex	de,hl
+	push	ix
+	pop	hl		;fcb буфер
+;  имя файла
+	ld	bc,#000B
+	ldir
+;  атрибуты файла
+	ld	a,(ix+fcbType)
+;	rra
+;	rra
+	and	%00010000
+	or	%00100000
+	ld	(de),a
+	inc	de
+;  поле NT
+	xor	a
+	ld	(de),a
+	inc	de
+	ex	de,hl
+;  установка времени и даты создания
+	ld	(hl),a
+	inc	hl		;секунды и сотые доли секунды
+	IFDEF	forProfROM
+	 ld	a,(iy-#1E)	;секунды
+	 rlca
+	 rlca
+	 ld	c,(iy-#1D)	;минуты
+	 ld	b,#03
+loop020	 rr	c
+	 rra
+	 djnz	loop020
+	 ld	e,a
+	 ld	(hl),a
+	 inc	hl
+	 ld	a,(iy-#1C)	;часы
+	 rlca	
+	 rlca	
+	 rlca	
+	 or	c
+	 ld	d,a
+	 ld	(hl),a
+	 inc	hl
+	 ld	c,(iy-#1B)	;день
+	 ld	a,(iy-#1A)	;месяц
+	 rrca
+	 rrca
+	 rrca
+	 ld	b,a
+	 and	%11100000
+	 or	c
+	 ld	c,a
+	 ld	(hl),a
+	 inc	hl
+	 ld	a,(iy-#19)	;год
+	 add	a,20
+	 rr	b
+	 rla
+	 ld	b,a
+	 ld	(hl),a
+	 inc	hl
+	ELSE
+	 ld	(hl),a
+	 inc	hl
+	 ld	(hl),a
+	 inc	hl
+	 ld	(hl),a
+	 inc	hl
+	 ld	(hl),a
+	 inc	hl
+	 ld	e,a
+	 ld	d,a
+	 ld	c,a
+	 ld	b,a
+	ENDIF	
+;  дата последнего доступа
+	ld	(hl),c
+	inc	hl
+	ld	(hl),b
+	inc	hl
+;  старшее слово номера первого кластера
+	ld	a,(ix+fcbClsFile+2)
+	ld	(hl),a
+	inc	hl
+	ld	a,(ix+fcbClsFile+3)
+	ld	(hl),a
+	inc	hl
+;  время и дата последнего изменения файла
+	ld	(hl),e
+	inc	hl
+	ld	(hl),d
+	inc	hl
+	ld	(hl),c
+	inc	hl
+	ld	(hl),b
+	inc	hl
+;  младшее слово номера первого кластера
+	ld	a,(ix+fcbClsFile)
+	ld	(hl),a
+	inc	hl
+	ld	a,(ix+fcbClsFile+1)
+	ld	(hl),a
+	inc	hl
+;  размер файла
+	push	ix
+	ex	(sp),hl
+	ld	de,fcbSize
+	add	hl,de
+	pop	de
+	ld	bc,#0004
+	ldir
+
+;запишем сектор каталога
+	ld	hl,Buf4File
+	hddWriteSecHL		;записали сектор
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+findFreeDirEntry	ifused
+;поиск пустой записи в каталоге
+;  для корректной записи длинных имен удаленные записи должны игнорироваться
+;  в fcb должны быть установлены: fcbClsDIR
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 были ошибки. код ошибки в A
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errFileEmpty
+;       a=errDiskNoSpace
+;     cy=0 запись найдена
+;	dehl - адрес сектора с пустой записью
+;       bc - смещение в секторе
+;
+;findFreeDirEntry
+;
+	push	ix
+
+;установка параметров из fcb
+	push	ix
+	pop	hl
+	ld	de,fcbClsDIR
+	add	hl,de		;адрес переменной с номером первого кластера каталога
+	ld	e,d
+
+;чтение сектора и поиск записи
+loop019	push	hl		;адрес переменной с номером первого кластера
+	push	de		;смещение от начала каталога в секторах
+	call	ReadSectorHDD
+	jr	nc,goto048	;сектор прочитан
+	cp	errEoF
+	jr	nz,goto046	;ошибки чтения
+;пустая запись не найдена. добавляем кластер к каталогу
+;	call	FindFreeClsRoot
+	call	FindFreeClsFSinfo
+	jr	c,goto047
+	ld	a,errDiskNoSpace
+	jr	z,goto046
+	ld	(tmpDWORD),hl
+	ld	(tmpDWORD+2),de	;номер свободного кластера
+	pop	bc
+	ex	(sp),hl
+	push	de
+	call	LD_DEHL_adrHL
+	call	AddCls2Chain
+	jr	c,goto047	;ошибки чтения/записи
+;  очистка добавленного кластера
+	pop	de
+	pop	hl
+	ld	ix,Buf4File
+	call	fatClearCls
+	jr	goto050
+;  поиск пустой записи в прочитанном секторе
+goto048	ld	bc,#0000	;смещение в секторе
+loop017	push	ix
+	pop	hl
+	add	hl,bc
+	ld	a,(hl)
+	or	a
+	jr	z,goto047	;пустая запись найдена
+	ld	hl,#0020
+	add	hl,bc
+	ld	c,l
+	ld	b,h
+	bit	1,b
+	jr	z,loop017
+;  читаем следующий сектор каталога
+	pop	de
+	pop	hl
+	inc	de
+	jr	loop019
+goto046	scf
+;пустая запись найдена
+goto047	pop	de
+	pop	hl
+	ld	hl,(SecFileInBuf)
+	ld	de,(SecFileInBuf+2)
+goto050	pop	ix
+	ret
+
+	endif
+
+/* вариант с возвращаемыми дополнительными параметрами
+findFreeDirEntry	ifused
+;поиск пустой записи в каталоге
+;  в fcb должны быть установлены: fcbClsDIR
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 были ошибки. код ошибки в A
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errFileEmpty
+;       a=errDiskNoSpace
+;       hl,de,bc,hl',de',bc' - ???
+;     cy=0 запись найдена
+;	dehl - адрес сектора с пустой записью
+;       bc - смещение в секторе в байтах
+;       a - номер записи в текущем секторе
+;       bc' - смещение от начала каталога в секторах
+;
+;findFreeDirEntry
+;
+;установка параметров из fcb
+	push	ix
+	pop	hl
+	ld	de,fcbClsDIR
+	add	hl,de		;адрес переменной с номером первого кластера каталога
+	jr	findFreeEntryCurDir
+	org	$-2
+
+	endif
+
+
+findFreeEntryCurDir	ifused
+;поиск пустой записи в текущем каталоге
+;параметры такие же, кроме fcb
+;вх:  hl - адрес переменной с номером первого кластера каталога
+;
+;findFreeEntryCurDir
+;
+	push	ix
+	ld	de,#0000
+
+;чтение сектора и поиск записи
+loop019	push	hl		;адрес переменной с номером первого кластера
+	push	de		;смещение от начала каталога в секторах
+	call	ReadSectorHDD
+	jr	nc,goto048	;сектор прочитан
+	cp	errEoF
+	jr	nz,goto046	;ошибки чтения
+;пустая запись не найдена. добавляем кластер к каталогу
+	call	FindFreeClsFSinfo
+;	call	FindFreeClsRoot
+	jr	c,goto047
+	ld	a,errDiskNoSpace
+	jr	z,goto046
+	ld	(tmpDWORD),hl
+	ld	(tmpDWORD+2),de	;номер свободного кластера
+	pop	bc		;смещение от начала каталога в секторах
+	ex	(sp),hl
+	push	bc
+	push	de
+	call	LD_DEHL_adrHL
+	call	AddCls2Chain
+	jr	c,goto169	;ошибки чтения/записи
+;  очистка добавленного кластера
+	pop	de
+	pop	bc
+	pop	hl
+	push	bc
+	ld	ix,Buf4File
+	call	fatClearCls	;bc=#0000
+	jr	c,goto170
+	exx
+	pop	bc		;смещение от начала каталога в секторах
+	exx
+	pop	hl
+	xor	a
+	jr	goto050
+;  поиск пустой записи в прочитанном секторе
+goto048	xor	a
+	ld	b,a
+	ld	c,a		;смещение в секторе
+loop017	push	ix
+	pop	hl
+	add	hl,bc		;nc
+	inc	(hl)
+	dec	(hl)
+	jr	z,goto047	;пустая запись найдена
+	inc	a
+	ld	hl,#0020
+	add	hl,bc
+	ld	c,l
+	ld	b,h
+	bit	1,b
+	jr	z,loop017
+;  читаем следующий сектор каталога
+	pop	de
+	pop	hl
+	inc	de
+	jr	loop019
+goto169	pop	bc
+goto046	scf
+;пустая запись найдена
+goto047	exx
+	pop	bc		;смещение в секторах
+	exx
+goto170	pop	hl
+	ld	hl,(SecFileInBuf)
+	ld	de,(SecFileInBuf+2)
+goto050	pop	ix
+	ret
+
+	endif
+*/
+;------------------------------------------------------------------------------
+newFileFreeSpace	ifused
+;создание цепочки кластеров с заданным количеством байт
+;  в fcb должны быть установлены: fcbClsFile
+;вх:  dehl - размер в байтах
+;     ix - адрес fcb буфера
+;вых: cy=1 ошибки
+;        a=errRWnum - код ошибки
+;        a=errNumTooBig - слишком большой размер
+;        a=errFileEmpty - нулевой размер файла
+;        a=errDiskNoSpace -> bc - количество не выделенных кластеров
+;                            dehl - номер первого кластера в добавленной цепочке
+;     cy=0 добавили успешно
+;        dehl - номер второго кластера в созданной цепочке
+;
+;newFileFreeSpace
+;
+	call	sizeBytes2Cls	;вычисление размера в кластерах
+	ret	c	
+
+;в первый кластер запишем признак конца цепочки
+	push	hl
+	call	LD_DEHL_fcbClsFile
+	push	de
+	push	hl
+	call	SetLastClsInFAT
+	pop	hl
+	pop	de
+	pop	bc
+	ret	c
+;dehl - номер первого кластера файла
+;bc - размер в кластерах
+
+;запишем остальную цепочку, если она есть
+	dec	bc
+	ld	a,b
+	or	c
+	ret	z
+	jr	fatAddFreeSpace_dehl
+
+	endif
+
+;------------------------------------------------------------------------------
+addFileFreeSpace	ifused
+;добавление заданного количества байт к существующей цепочке кластеров
+;вх:  dehl - размер в байтах
+;     (tmpDWORD) - номер последнего кластера цепочки
+;вых: cy=1 ошибки
+;        a=errRWnum - код ошибки
+;        a=errNumTooBig - слишком большой размер
+;        a=errFileEmpty - нулевой размер файла
+;        a=errDiskNoSpace -> bc - количество не выделенных кластеров
+;                            dehl - номер первого кластера в добавленной цепочке
+;     cy=0 добавили успешно
+;        dehl - номер первого кластера в добавленной цепочке
+;
+;addFileFreeSpace
+;
+	call	sizeBytes2Cls	;вычисление размера в кластерах
+	ret	c
+	ld	c,l
+	ld	b,h
+	jr	fatAddFreeSpace_var
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+fatAddFreeSpace_var	ifused
+;добавление в цепочку кластеров заданного количества кластеров
+;вх:  bc - количество кластеров
+;     (tmpDWORD) - номер первого кластера цепочки
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;        a=errDiskNoSpace -> bc - количество не выделенных кластеров
+;                            dehl - номер первого кластера в добавленной цепочке
+;     cy=0 добавили успешно
+;        dehl - номер первого кластера в добавленной цепочке
+;
+;fatAddFreeSpace_var
+;
+	ld	hl,(tmpDWORD)
+	ld	de,(tmpDWORD+2)
+	jr	fatAddFreeSpace_dehl
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+fatAddFreeSpace_dehl	ifused
+;добавление в цепочку кластеров заданного количества кластеров
+;вх:  bc - количество кластеров
+;     dehl - номер последнего кластера цепочки
+;вых: cy=1 ошибки чтения/записи
+;        a=errRWnum - код ошибки
+;        a=errDiskNoSpace -> bc - количество не выделенных кластеров
+;                            dehl - номер первого кластера в добавленной цепочке
+;     cy=0 добавили успешно
+;        dehl - номер первого кластера в добавленной цепочке
+;
+;fatAddFreeSpace_dehl
+;
+;	call	setFsInfoEmpty		;сброс номера первого свободного кластера
+;	ret	c
+
+;поиск свободного кластера от начала раздела
+	push	bc
+	push	de
+	push	hl
+	call	FindFreeClsFSinfo	;ищем свободный кластер от начала раздела
+;	call	FindFreeClsRoot		;ищем свободный кластер от начала раздела
+	ld	(tmpDWORD2),hl
+	ld	(tmpDWORD2+2),de	;номер первого кластера в добавленной цепочке
+	jr	goto038
+
+;добавляем цепочку кластеров
+loop013	push	bc
+	push	de
+	push	hl
+	call	Inc_DEHL
+	jr	z,goto043
+	call	FindFreeCls		;ищем свободный кластер
+goto038	ld	(tmpDWORD),hl
+	ld	(tmpDWORD+2),de		;номер свободного кластера
+	pop	hl
+	pop	de			;номер текущего кластера
+	jr	c,goto039		;ошибки чтения/записи
+	jr	z,goto040		;нет свободных кластеров
+	call	SetNClsInFAT
+	jr	c,goto039		;ошибки чтения/записи
+	ld	hl,(tmpDWORD)
+	ld	de,(tmpDWORD+2)
+	pop	bc
+	dec	bc
+	ld	a,b
+	or	c
+	jr	nz,loop013
+	call	setFsInfoFreeCls
+;dehl - номер последнего кластера добавленной цепочки
+
+;пишем в последний кластер признак конца цепочки
+;dehl - номер кластера
+proc_05	call	SetLastClsInFAT
+	ld	hl,(tmpDWORD2)
+	ld	de,(tmpDWORD2+2)
+	ret
+
+;нет свободных кластеров
+goto043	pop	hl
+	pop	de
+goto040	call	proc_05
+	ld	a,errDiskNoSpace	;disk no space
+	scf
+;ошибки чтения/записи
+goto039	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+WriteSectorHDD	ifused
+;запись сектора на винчестер
+;вх:  hl - адрес переменной с номером первого кластера файла
+;     de - смещение от начала файла в секторах (512b)
+;вых: hl - адрес буфера для записи
+;     cy=1 были ошибки. код ошибки в A
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;
+;WriteSectorHDD
+;
+	call	CalcAdrSecInFile	;расчет LBA номера сектора файла на винчестере
+					;dehl - LBA адрес сектора
+	ret	c			;ошибка: адрес за пределами образа диска
+	hddSetCurrSec			;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+	ld	hl,Buf4File
+	hddWriteSecHL			;запись сектора из буфера на винчестер
+	ret	nc			;нет ошибок записи
+	ld	a,errRWnum		;код ошибки: ошибка при чтении или записи сектора функциями 5 или 6
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+ReadSectorHDD	ifused
+;чтение сектора с винчестера
+;вх:  hl - адрес переменной с номером первого кластера файла
+;     de - смещение от начала файла в секторах (512b)
+;вых: ix,hl - адрес буфера для чтения
+;     cy=1 были ошибки. код ошибки в A
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;
+;ReadSectorHDD
+;
+	call	CalcAdrSecInFile;расчет LBA номера сектора файла на винчестере
+				;dehl - LBA адрес сектора
+	ret	c		;ошибка: адрес за пределами образа диска
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+	ld	ix,Buf4File
+	hddReadSec2IX		;чтение сектора с винчестера в буфер
+	ret	nc		;ошибок не было
+	ld	a,errRWnum
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+CalcAdrSecInMountFile	ifused		;для ПрофПЗУ
+;расчет LBA номера сектора на винчестере в примонтированном файле (.trd)
+;  после отработки данной процедуры сектор должен быть прочитан
+;вх:  de - смещение от начала файла в секторах (512b)
+;вых: cy=1 ошибка: адрес за пределами образа диска
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0 dehl - смещение в секторах (512b) от начала винчестера до нужного сектора
+;
+;CalcAdrSecInMountFile
+;
+	ld	hl,xE590+#01	;переменная с номером первого кластера файла
+	call	InitCurrMountFAT
+	jr	goto057
+	jr	CalcAdrSecInFile
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+CalcAdrSecInFile	ifused
+;расчет LBA номера сектора файла на винчестере
+;  после отработки данной процедуры сектор должен быть прочитан
+;вх:  hl - адрес переменной с номером первого кластера файла
+;     de - смещение от начала файла в секторах (512b)
+;вых: cy=1 ошибка: адрес за пределами образа диска
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0 dehl - LBA адрес сектора
+;
+;CalcAdrSecInFile
+;
+	call	InitCurrFAT	;инициализация раздела FAT, если нужно
+goto057	ret	c
+
+;расчет смещения в кластерах
+	ld	a,e
+	ld	c,e		;a,c - для расчета смещения в кластере
+	push	af
+	ld	a,(LenCLSInSec)
+	ld	b,a		;a,b - размер кластера в секторах
+	push	af
+	ex	de,hl
+	push	de
+	push	de
+	ld	de,#0000	;dehl смещение в секторах от начала файла
+	call	SRL_dehl_A	;hl смещение в кластерах от начала файла
+
+;проверка не загружен ли сектор этого кластера в буфер
+;  hl - смещение в кластерах от начала файла
+;  b  - размер кластера в секторах
+;  c  - для рассчета смещения в кластере
+;
+;  проверим с каким файлом мы работаем
+	ex	(sp),hl
+	ld	de,NumFstCluster
+	call	cmp_adrDE_adrHL	;сравнение двух 4х-байтных числа по адресам в de и hl
+	pop	hl
+	jr	nz,goto019	;файл другой
+;  проверим с каким кластером файла работаем
+	ld	de,(NumCluster)	;порядковый номер кластера с предыдущим прочитанным сектором
+	ex	de,hl
+	or	a
+	sbc	hl,de
+	ex	de,hl
+	jr	nz,goto019	;сектор другого кластера
+;  расчет смещения в секторах в текущем кластере
+	ld	a,b
+	dec	a
+	and	c
+	ld	c,a		;смещение в кластере в секторах
+	ld	a,(NumSecCls)	;порядковый номер сектора кластера в буфере
+	ld	d,a
+	neg
+	add	a,c
+	ld	c,a		;смещение относительно загруженного сектора
+	ld	e,a		;смещение относительно загруженного сектора
+	ld	a,d		;порядковый номер сектора кластера в буфере
+	add	a,c
+	cp	b
+	jr	nc,goto019	;вышли за пределы кластера (условие вроде бы невороятное)
+;  расчет адреса нового сектора
+	pop	hl		;адрес переменной с номером первого кластера файла
+	ld	(NumSecCls),a	;порядковый номер сектора кластера в буфере
+	pop	af
+	pop	af
+	ld	a,e
+	rlca
+	sbc	a,a
+	ld	b,a
+	ld	c,e
+	ld	de,(SecFileInBuf+2)
+	ld	hl,(SecFileInBuf)
+	jr	c,goto020	;вычитание
+	add	hl,bc		;сложение
+	jr	nc,goto021
+	inc	de
+	jr	goto021
+goto020	add	hl,bc		;вычитание
+	jr	c,goto021
+	dec	de
+	jr	goto021
+
+;расчет адреса сектора
+goto019	ld	(NumCluster),hl
+	ld	c,l
+	ld	b,h
+	pop	hl
+	call	LD_DEHL_adrHL	;dehl - ;номер первого кластера файла
+	ld	(NumFstCluster+2),de
+	ld	(NumFstCluster),hl
+	call	FindCLSinFile	;поиск номера кластера по смещению от начала файла/каталога
+	jr	c,goto023	;ошибка. прерываем функцию
+	jr	z,goto022	;файл пустой
+	call	GetAdrRealSector;dehl адрес сектора
+	pop	af		;a - размер кластера в секторах
+	dec	a
+	ld	c,a
+	pop	af		;смещение в секторах от начала файла
+	and	c
+	ld	c,a
+	ld	b,#00		;смещение в кластере в секторах
+	ld	(NumSecCls),a
+	add	hl,bc
+	ex	de,hl
+	ld	c,b
+	adc	hl,bc
+	ex	de,hl		;dehl - адрес заданного сектора
+goto021	ld	(SecFileInBuf+2),de
+	ld	(SecFileInBuf),hl
+	or	a
+	ret
+
+;ошибка: файл пустой
+goto022	ld	a,errFileEmpty	;код ошибки: адрес за пределами образа диска
+;ошибка чтения/записи
+goto023	ld	hl,NumCluster+#01
+	ld	(hl),#FF
+error2	pop	bc
+	pop	bc
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+FindCLSinFile	ifused
+;Поиск номера кластера по смещению от начала файла/каталога
+;вх:  dehl - номер первого кластера файла/каталога
+;     bc - смещение от начала файла/каталога в кластерах
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0
+;        z - файл пустой
+;        nz -> a =#01 - dehl номер найденного кластера
+;     hl',de',bc' - ???
+;
+;FindCLSinFile
+;
+;проверим не удален ли файл
+	IFDEF	forProfROM
+	 CheckDelFile
+	 jr	nz,loop010	;проверка не нужна
+	 push	hl
+	 push	de
+	 push	bc
+	 call	ReadFATnextCls	;чтение номера второго кластера
+	 jr	c,goto045
+	 ld	a,d
+	 or	e
+	 or	h
+	 or	l
+	 pop	bc
+	 pop	de
+	 pop	hl
+	 scf
+	 jr	z,goto017	;если =0, значит файл удален
+	ENDIF
+	IFDEF	forRRL
+	 CheckDelFile
+	 jr	nz,loop010	;проверка не нужна
+	 push	hl
+	 push	de
+	 push	bc
+	 call	ReadFATnextCls	;чтение номера второго кластера
+	 jr	c,goto045
+	 ld	a,d
+	 or	e
+	 or	h
+	 or	l
+	 pop	bc
+	 pop	de
+	 pop	hl
+	 scf
+	 jr	z,goto017	;если =0, значит файл удален
+	ENDIF
+
+;проверка не пустой ли файл
+loop010	ld	a,d
+	or	e
+	or	h
+	or	l
+	ret	z		;файл пустой
+	ld	a,h
+	and	l
+	and	e
+	inc	a
+	jr	nz,goto145
+	ld	a,d
+	cp	#0F
+	jr	z,goto144	;файл кончился
+;  поиск номера кластера по таблице FAT
+goto145	ld	a,b
+	or	c
+	jr	z,goto018	;dehl - найденный номер кластера
+	call	TestLastCLS
+	jr	c,goto017	;файл прервался
+	push	bc
+	call	ReadFATnextCls	;чтение номера следующего кластера
+	pop	bc
+	ret	c
+	dec	bc
+	jr	loop010
+goto018	inc	a
+	ret
+goto144	scf
+goto017	ld	a,errEoF
+	ret
+	IFDEF	forProfROM
+goto045  pop	bc
+ 	 pop	de
+	 pop	hl
+	 ret
+	ENDIF
+	IFDEF	forRRL
+goto045  pop	bc
+ 	 pop	de
+	 pop	hl
+	 ret
+	ENDIF
+
+	endif
+
+;==============================================================================

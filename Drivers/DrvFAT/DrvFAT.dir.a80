@@ -1,0 +1,1549 @@
+;Процедуры  FAT Driver. работа с каталогом
+;файл DrvFAT.dir.a80
+;
+;fatRenMoveEntry	переименование/перенос записи в другой каталог в
+;			пределах одного раздела FAT
+;fatWriteEntry		создание записи в каталоге (только записи)
+;FindPathFile		поиск файла по заданному пути в текущем каталоге со
+;			входом в подкаталоги с проверкой синтаксиса
+;SetPathFile		поиск файла по заданному пути в текущем каталоге со
+;			входом в подкаталоги с проверкой синтаксиса
+;			с установкой найденного каталога текущим
+;Enter2DIR		вход в директорию
+;SetDirCurrent		установка директории текущей 
+;fatEraseEntry		удаление записи в текущем каталоге (файла/пустого каталога)
+;fatMarkDelEntry	пометка записи файла в каталоге вместе с записями
+;			длинного имени удаленными
+;fatGetEntryLBA		найти в текущем каталоге дескриптор записи по LBA адресу
+;fatGetEntryLong	найти в текущем каталоге дескриптор записи по номеру
+;fatGetEntry		найти в текущем каталоге дескриптор записи по номеру
+;fatTestEmptyDir	проверка текущго каталога пустой или нет
+;SortFoundedEntries	сортировка списка найденных дескрипторов
+;			(файлов/каталогов)
+;GetNumOfEntries	подсчет количества легинтимных (первых 256) записей в
+;			текущем каталоге
+;fatCreateDIR		создание каталога в текущем FAT32 каталоге
+;fatCreateDIRlfn	создание каталога с длинным именем в текущем FAT32 каталоге
+;fatFindEntryDir	поиск записи в текущем каталоге по имени в формате
+;			name[.][ext]\
+;CP_TwoDot		проверка имени файла на две точки (ссылка на родителя)
+;CP_OneDot		проверка имени файла на одну точку (ссылка на себя)
+;ReadSectorDIR		чтение сектора каталога в буфер по номеру записи
+;fatSetTmpDir		установка временной текущей директории
+;
+;------------------------------------------------------------------------------
+fatRenMoveEntry	ifused
+;переименование/перенос записи из текущего каталога в другой каталог
+;  в пределах одного раздела
+;  имя должно быть проверено и для SFN переведено в верхний регистр
+;  файл/каталог должен существовать
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbAttr, fcbClsFile,
+;    fcbClsDIR, bit3 fcbType=0/1 SFN/LFN
+;вх:  ix - адрес буфера fcb
+;     fcbName, fcbExt - старое имя и расширение
+;     hl - адрес строки с длинным именем в формате ASCIIZ
+;     hl - адрес нового имени в формате name[.][ext]\ (или ф вормате 8+3)
+;     de - адрес переменной с первым кластером каталога-приемника, если равен
+;       полю fcbClsDIR то это переименование
+;вых: cy=1 ошибка чтения/записи, запись не найдена
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;	a=errFileNotFound
+;       a=errInvFileName файл с таким именем существует/пустое имя
+;       a=errDiskNoSpace
+;     cy=0 запись внесена в катлог
+;
+;fatRenMoveEntry
+;
+;определим номер записи в каталоге-источнике
+	push	hl
+	push	de
+	push	ix
+	pop	hl
+	call	fcbFindEntry
+	pop	de
+	pop	hl
+	ret	c			;ошибка чтения/файл не найден
+
+;проверка типа записи SFN/LFN
+	push	bc			;номер записи в каталоге-источнике 
+	bit	3,(ix+fcbType)
+	jr	nz,goto191		;запись LFN
+
+;проверка существования файла в каталоге-приемнике (для SFN)
+	push	de
+;  установим каталог-приемник
+	push	hl
+	ex	de,hl
+	call	excngCLSCurrDir		;каталог-приемник
+	pop	hl
+;  сформируем имя SFN в fcb для записи на приемник
+	push	hl
+	push	ix
+	pop	de
+	call	FileNameTo8dot3
+	pop	hl
+;  поиск записи в каталоге-приемнике
+	call	fatFindEntryDir
+	pop	hl
+	jr	c,goto192		;ошибка чтения
+	ld	a,errFileExist
+	jr	z,goto192		;nc такой файл существует на приемнике
+;  установим каталог-источник
+	push	hl
+	call	excngCLSCurrDir		;каталог-источник
+	pop	de
+	sbc	hl,hl			;hl=#0000
+
+;создание записи в каталоге-приемнике
+goto191	call	fatWriteEntry		;создадим запись
+	pop	bc
+	ret	c			;ошибка
+
+;удаление записи в каталоге-источнике
+	ld	a,#FF
+	ld	(SecDIRinBuf+#03),a	;что бы сектор перечитался
+	jp	fatMarkDelEntry		;удаление записи без очистки цепочки кластеров
+
+;ошибка
+goto192	pop	bc
+	scf
+	jr	proc_17			;каталог-источник (вхо в п/п fatWriteEntry)
+
+
+/*первый вариант. некоррекный
+;fatRenMoveEntry
+;
+;установка признака каталога
+	ld	a,(ix+fcbAttr)
+	and	#10
+	ld	(ix+fcbType),a
+
+;проверяем существование файла в каталоге приемнике/текущем
+	push	hl
+	push	de
+	ex	de,hl
+	call	excngCLSCurrDir		;каталог-приемник
+	push	ix
+	pop	hl
+	call	fatFindEntryDir
+	jr	c,goto188		;ошибка чтения
+	ld	a,errFileExist
+	jr	z,goto188		;nc такой файл существует на приемнике
+	pop	hl
+	push	hl
+	call	excngCLSCurrDir		;восстановим ClsDIR источника
+
+;получим номер записи исходного файла в каталоге источнике
+	push	ix
+	pop	hl
+	call	fatFindEntryDir		;bc - номер записи в каталоге
+	jr	c,goto189		;ошибка
+	ld	a,errFileNotFound
+	jr	nz,goto189		;запись с таким именем отсутствует
+	call	fatMarkDelEntry		;удаление записи без очистки цепочки кластеров
+	jr	c,goto189		;ошибка
+
+;создание записи в каталоге приемнике
+	pop	de
+	pop	hl
+	call	fatWriteEntry
+
+;выход по ошибке
+goto188	pop	hl
+	push	hl
+	call	proc_17			;каталог-приемник
+goto189	pop	hl
+	pop	de
+	ret
+*/
+	endif
+
+;------------------------------------------------------------------------------
+fatWriteEntry	ifused
+;создание записи в каталоге (только записи)
+;  файл/каталог должен существовать
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbAttr, fcbClsFile,
+;    fcbClsDIR, fcbSize
+;вх:  ix - адрес буфера fcb
+;     fcbName, fcbExt - новые имя и расширение при работе с SFN
+;     hl - адрес строки с длинным именем в формате ASCIIZ  (fcbName, fcbExt можно не устанавливать)
+;        =#0000 для SFN
+;     de - адрес переменной с первым кластером каталога приемника, если равен
+;       полю fcbClsDIR то это переименование
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errInvFileName файл с таким именем существует/пустое имя
+;       a=errDiskNoSpace
+;     cy=0 запись внесена в катлог
+;     hl,de,bc - ???
+;
+;fatWriteEntry
+;
+;установка признака каталога
+	ld	a,(ix+fcbAttr)
+	and	#10
+	ld	(ix+fcbType),a
+
+;создание записи в каталоге-приемнике
+	push	hl
+	push	de
+	ex	de,hl
+	call	excngCLSCurrDir		;каталог-приемник
+	call	fcbSetCLSCurrDir	;установка в fcb адреса кластера каталога-родителя
+	pop	hl
+	ex	(sp),hl
+	call	fatAddFileEntry
+	jr	c,goto190		;ошибка
+
+;для каталога установим ссылку на нового родителя
+	bit	4,(ix+fcbType)
+	jr	z,goto190		;nc это файл
+;  проверим каталог на наличие записей
+	push	ix
+	pop	hl
+	ld	de,fcbClsFile
+	add	hl,de
+	push	hl
+	call	excngCLSCurrDir
+	ld	bc,#0000		;bc=#0000 номер текущей записи в каталоге
+	call	ReadSectorDIR		;чтение сектора каталога в буфер по номеру записи
+	call	nc,LD_DEHL_fcbClsFile	;если нет ошибки
+	ld	(Buf4DIR+#20+#14),de	;для записи .. (ссылка на родителя)
+	ld	(Buf4DIR+#20+#1A),hl
+	call	nc,SaveSecBuf2DIR	;если нет ошибки
+	pop	hl
+	call	proc_17			;восстановим ClsFile
+goto190	pop	hl
+proc_17	push	af
+	call	excngCLSCurrDir		;восстановим CLSCurrDir
+	pop	af
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+FindPathFile	ifused
+;поиск файла по заданному пути в текущем каталоге со входом в подкаталоги
+;с проверкой синтаксиса
+;вх:  hl - путь к файлу, первый байт длина пути (установится при выходе)
+;вых: cy=1 ошибка чтения/имя в каталоге не найдено/путь пустой
+;       z  - путь пустой, текущий каталог не изменился
+;         a=errPathEmpty
+;       nz - ошибка чтения/имя в каталоге не найдено
+;         a=errInvFileName
+;         a=errRWnum
+;         a=errInvalidPart
+;         a=errEoF - файл прервался
+;         a=errFileEmpty - пустой корневой каталог
+;         a=errFileNotFound
+;     cy=0 запись в каталоге найдена
+;       z  -> a=#00 - это каталог
+;       nz -> a=#00 - это файл, он был последний в пути
+;       nz -> a<>#00 - это файл, но не последний в пути
+;       b - обработанная вложенность
+;       hl - адрес начала дескриптора файла
+;       de - адрес начала пути
+;       (de) - длина пути
+;
+;FindPathFile
+;
+	call	SetPathFile
+	ret	c
+	scf			;восстановим адрес директории
+	call	StoreCLSCurrDir
+	ccf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SetPathFile	ifused
+;поиск файла по заданному пути в текущем каталоге со входом в подкаталоги
+;с проверкой синтаксиса с установкой найденного каталога текущим
+;формат имени: [Drive:][\][DIR\DIR\..\DIR\]filename.ext
+;вх:  hl - путь к файлу, первый байт длина пути (установится при выходе)
+;вых: cy=1 ошибка чтения/имя в каталоге не найдено/путь пустой
+;       z  - путь пустой, текущий каталог не изменился
+;         a=errPathEmpty
+;       nz - ошибка чтения/имя в каталоге не найдено
+;         a=errInvFileName
+;         a=errRWnum
+;         a=errInvalidPart
+;         a=errEoF - файл прервался
+;         a=errFileEmpty - пустой корневой каталог
+;         a=errFileNotFound
+;     cy=0 запись в каталоге найдена
+;       z  -> a=#00 - это каталог, текущий кластер = каталогу
+;       nz -> a=#00 - это файл, он был последний в пути
+;                      текущий кластер = каталогу с файлом
+;       nz -> a<>#00 - это файл, но не последний в пути
+;                      текущий кластер = каталогу с файлом
+;       b - обработанная вложенность
+;       hl - адрес начала дескриптора файла
+;       de - адрес начала пути
+;       (de) - длина пути
+;       (DescInCurrDir) - номер найденной записи(файла) в каталоге
+;     (tmpDIR) предыдущее значение (CLS_CurrDir)
+;
+;SetPathFile
+;
+;запомним кластер текущего каталога
+	or	a
+	call	StoreCLSCurrDir
+
+;проверка пути/имени к файлу
+        push	hl
+	inc	hl
+	call	TestPathFile	;проверка пути/имени к файлу
+	ld	a,errInvFileName
+	jr	c,goto134	;ошибка в имени файла
+	ld	a,errPathEmpty
+	jr	z,goto135	;путь пустой
+	xor	a		;a - вложенность
+	push	af
+loop049	call	SkipSeparator	;пропуск разделителей имен в пути
+	or	a
+	jr	z,goto128	;конец пути
+
+;поиск имени в текущем каталоге
+	push	hl
+	call	fatFindEntryDir
+	jr	c,goto126	;ошибка чтения
+	jr	nz,goto125	;имя в каталоге не найдено
+	ex	(sp),hl	
+	ld	hl,#000B
+	add	hl,de
+	bit	4,(hl)
+	jr	z,goto127	;это файл
+	ld	h,d
+	ld	l,e		;адрес дескриптора в буфере
+	call	CP_TwoDot
+	push	af
+	call	SetDirCurrent
+	pop	af
+	pop	hl
+	pop	bc
+	jr	nz,goto130	
+	dec	b
+	dec	b		;вложенность -1
+goto130	inc	b		;вложенность +1
+	push	bc
+	ld	a,(hl)
+	or	a
+	jr	nz,loop049
+	jr	goto128
+
+;найден файл
+;(sp)b - вложенность
+;(sp)hl - адрес с именем файла
+;de - адрес дескриптора в буфере
+goto127	dec	h		;установка флага nz
+	pop	hl		;адрес следующего имени в пути
+	ld	a,(hl)
+
+;конец пути
+;вх: z,a=#00  - это каталог
+;    nz,a=#nn - это файл
+;    hl - адрес следующего имени в пути (указывает на #00/#nn)
+;    de - адрес дескриптора в буфере
+goto128	ex	af,af'
+	pop	af		;вложенность
+	pop	bc		;начало пути к файлу
+	push	af
+;  расчет и сохранение длины пути
+	ld	(hl),#00
+	or	a
+	sbc	hl,bc
+	ld	h,b
+	ld	b,l
+	ld	l,c		;hl начало пути к файлу
+	ld	(hl),b
+	ex	de,hl		
+	pop	bc		;b = вложенность
+	ex	af,af'
+	ret
+
+;имя в каталоге не найдено
+goto125	ld	a,errFileNotFound
+
+;ошибка чтения/записи
+;вх:  a - код ошибки
+;вых: cy=1
+goto126	pop	hl
+	pop	hl
+goto134	or	a		;флаг nz
+goto135	scf			;восстановим адрес директории
+	pop	hl
+	jp	StoreCLSCurrDir
+
+	endif
+
+;------------------------------------------------------------------------------
+Enter2DIR	ifused
+;вход в директорию
+;вх:  hl - адрес дескриптора директории/файла
+;     a - attr записи
+;     7,e =0 это файл/каталог
+;         =1 это возврат в родительский каталог
+;     0,e =1 это длинное имя
+;вых: hl,de,bc,a - ???
+;
+;Enter2DIR
+;
+	bit	4,a
+	jp	z,RenewPath	;это файл. изменим строку текущего пути
+	bit	7,e
+	ld	bc,CurrentLevel	;глубина пути к текущему каталогу
+	ld	a,(bc)
+	jr	z,goto124	;переход в подкаталог
+
+;переход в родительский каталог
+	or	a
+	ret	z		;мы в корневом каталоге
+	dec	a
+	dec	a
+
+;переход в подкаталог
+goto124	inc	a
+	cp	#10
+	ret	z		;слишком большая вложенность
+	ld	(bc),a
+	call	RenewPath	;изменим строку текущего пути
+	jr	SetDirCurrent
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+SetDirCurrent	ifused
+;установка директории текущей 
+;вх:  hl - адрес дескриптора директории
+;вых: bc=#0005
+;
+;SetDirCurrent
+;
+	push	de
+	ld	bc,#0014
+	add	hl,bc
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)		;номер кластера (старшее слово)
+	ld	c,#05
+	add	hl,bc
+	ld	a,(hl)
+	inc	hl
+	ld	h,(hl)		;номер кластера (младшее слово)
+	ld	l,a
+	or	h
+	or	d
+	or	e
+	jr	nz,goto123	;не корневой каталог
+	ld	hl,(RootClaster)
+	ld	de,(RootClaster+2)
+goto123	ld	(CLS_CurrDir),hl
+	ld	(CLS_CurrDir+2),de
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatEraseEntry	ifused
+;удаление записи в текущем каталоге (файла/пустого каталога)
+;  в fcb должны быть установлены: fcbName, fcbExt
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errDirNotEmpty
+;     cy=0, nz - файл с заданным именем не существует
+;       a=errFileNotFound
+;     cy=0, z - файл/каталог удален
+;
+;fatEraseEntry
+;
+;проверка существования файла/каталога
+	push	ix
+	pop	hl
+	call	fatFindEntryDir
+	ret	c			;ошибка
+	ld	a,errFileNotFound
+	ret	nz			;запись с таким именем отсутствует
+	push	bc			;номер записи в каталоге
+	ex	de,hl
+	call	fcbSetFromEntry
+
+;если это каталог, проверим пустой он или нет
+	bit	4,(ix+fcbAttr)
+	jr	z,goto120		;это файл
+;  проверим каталог на наличие записей
+	push	ix
+	pop	hl
+	ld	de,fcbClsFile
+	add	hl,de
+	push	hl
+	call	excngCLSCurrDir
+	call	fatTestEmptyDir
+	pop	hl
+	push	af
+	call	excngCLSCurrDir
+	pop	af
+	pop	bc
+	ret	c
+	ld	a,errDirNotEmpty
+	scf
+	ret	nz
+	push	bc
+
+;удаление записи
+;  освобождение занятой цепочки кластеров
+goto120	call	LD_DEHL_fcbClsFile
+	call	FreeClsChain
+	pop	bc			;номер записи в каталоге
+	ret	c			;ошибка чтения/записи
+	jr	fatMarkDelEntry
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+fatMarkDelEntry	ifused
+;пометка записи файла в каталоге вместе с записями длинного имени удаленными
+;вх:  bc - номер записи в каталоге
+;вых: cy=1 ошибка чтения/записи -> a - код ошибки
+;       =0 завершено успешно -> a=#00
+;     hl,de,bc - ???
+;
+;fatMarkDelEntry
+;
+loop046	call	fatGetEntryLong
+	ret	c
+	push	bc
+	push	de
+	ld	(hl),#E5
+	call	SaveSecBuf2DIR
+	pop	de
+	pop	bc
+	ret	c
+	dec	bc
+	rr	e
+	jr	c,loop046
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatGetEntryLBA	ifused
+;найти в текущем каталоге дескриптор записи по LBA адресу
+;вх:  bc - номер записи в каталоге/номер записи в секторе
+;     dehl - LBA адрес сектора с записью
+	;     a - атрибуты предыдущей записи (если есть)
+;вых: bc не меняется
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0 запись найдена
+;       hl адрес записи в буфере
+;       a - attr записи в буфере
+;       7,d =0 это файл/каталог
+;           =1 это возврат в родительский каталог
+;       7,e =0 это файл/каталог
+;           =1 это возврат в родительский каталог
+;
+;fatGetEntryLBA
+;
+	push	bc
+;	push	af
+	call	LoadSecDIR2Buf	;вых: hl=Buf4DIR
+;	pop	bc
+;	ld	e,b
+	pop	bc
+	jr	proc_16
+	jr	fatGetEntry
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+fatGetEntryLong	ifused
+;найти в текущем каталоге дескриптор записи по номеру
+;вх:  bc - номер записи в каталоге
+;вых: bc не меняется
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0 запись найдена
+;       hl адрес записи в буфере
+;        a - attr записи в буфере
+;        7,d =0 это файл/каталог
+;            =1 это возврат в родительский каталог
+;        7,e =0 это файл/каталог
+;            =1 это возврат в родительский каталог
+;        0,e =1 это длинное имя
+;
+;fatGetEntryLong
+;
+	ld	a,b
+	or	c		;номер текущей записи в каталоге =#00?
+	ld	e,a
+	jr	z,fatGetEntry	;предыдущий номер не проверяем
+	dec	bc		;проверим предыдущий номер
+	call	fatGetEntry
+	inc	bc
+	ret	c		;ошибка чтения
+	ld	e,a		;атрибуты предыдущей записи
+
+	endif
+
+;------------------------------------------------------------------------------
+fatGetEntry	ifused
+;найти в текущем каталоге дескриптор записи по номеру
+;вх:  bc - номер записи в каталоге
+;      e - атрибуты предыдущей записи
+;вых: bc не меняется
+;     cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0 запись найдена
+;       hl адрес записи в буфере
+;       a - attr записи в буфере
+;       7,d =0 это файл/каталог
+;           =1 это возврат в родительский каталог
+;       7,e =0 это файл/каталог
+;           =1 это возврат в родительский каталог
+;       0,e =1 это длинное имя
+;
+;fatGetEntry
+;
+;proc_08	
+	push	de
+	call	ReadSectorDIR	;читаем сектор с заданным номером записи
+	pop	de		;hl=Buf4DIR
+proc_16	ret	c		;ошибка
+	ld	a,e		;наличие/отсутствие длинного имени
+	ex	af,af'
+	ld	a,c
+	and	#0F		;номер записи в секторе
+	ld	e,a
+	ld	d,#00
+	ex	de,hl
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl		;hl=hl*#20
+	add	hl,de		;адрес записи в буфере
+	ld	de,#000B
+	ld	a,(hl)		;первый байт имени
+	ex	de,hl
+	add	hl,de
+	ld	l,(hl)		;байт атрибутов
+	ld	h,a		;первый байт имени
+	ex	de,hl
+	call	CP_TwoDot
+	ld	d,#00
+	jr	nz,goto119	;будем входить в подкаталог
+	ld	d,#80		;будем выходить в родительский
+goto119	ex	af,af'
+	cp	#0F		;проверяем атрибуты предыдущей записи
+	scf
+	ccf
+	ld	a,e		;атрибуты текущей записи
+	ld	e,d		;направление назад/вперед
+	ret	nz
+	inc	e		;bit 0,e=1 есть длинное имя
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatTestEmptyDir	ifused
+;проверка текущго каталога пустой или нет
+;вх:  (CLS_CurrDir) - номер первого кластера каталога
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0 каталог проверен
+;       z - это пустой каталог
+;       7,a =0/1 каталог корневой/обычный
+;
+;fatTestEmptyDir
+;
+;читаем первый сектор и проверяем наличие фиксированной записи
+	ld	bc,#0000	;bc=#0000 номер текущей записи в каталоге
+	call	ReadSectorDIR	;чтение сектора каталога в буфер по номеру записи
+	ret	c		;ошибка
+	call	CP_OneDot	;hl=Buf4DIR
+	jr	z,goto116	;есть первая запись "."
+	ld	a,(hl)
+	or	a
+	ret	z		;пустой каталог (это может быть только корневой)
+	ld	a,#80		;это корневой каталог
+
+;сектор загружен, ищем совпадающую по имени запись
+goto116	push	af		;количество найденных записей
+loop045	push	bc		;номер записи
+	ld	c,#00		;номер записи в секторе
+loop044	ld	de,#000B
+	add	hl,de
+	ld	a,(hl)		;атрибуты
+	sbc	hl,de
+	ld	e,(hl)		;первый символ имени
+	cp	#0F
+	jr	z,goto117	;это часть длинного имени
+	cp	#08
+	jr	z,goto117	;Volume ID
+	ld	a,e
+	or	a
+	jr	z,goto118	;пустая запись. записи закончились
+	cp	#E5
+	jr	z,goto117	;удаленная запись
+;  легентимная запись найдена
+	pop	de
+	pop	af
+	inc	a
+	push	af
+	push	de
+	cp	#03
+	jr	nc,goto118	;каталог не пустой
+;  следующая запись в секторе
+goto117	ld	de,#0020
+	add	hl,de
+	inc	c
+	ld	a,c
+	cp	#10
+	jr	c,loop044
+
+;запись в секторе не найдена, грузим следующий сектор
+	pop	hl
+	ld	b,d
+	add	hl,bc
+	ld	c,l
+	ld	b,h		;номер первой записи в следующем секторе
+	call	ReadSectorDIR
+	jr	nc,loop045
+	cp	errEoF
+	jr	z,goto184
+
+;ошибка чтения/записи или другая
+	pop	hl
+	scf
+	ret
+
+;выход. каталог проверен
+goto118	pop	bc
+goto184	pop	af
+	cp	#80
+	ret	z
+	or	a
+	ret	z
+	ret	m
+	cp	#02
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SortFoundedEntries	ifused
+;сортировка списка найденных дескрипторов (файлов/каталогов)
+;
+;SortFoundedEntries
+;
+/*старый вариант
+	ld	hl,(DescInDIR)
+	ld	a,h
+	or	l
+	ret	z		;пустой каталог
+	dec	hl
+	ld	a,h
+	or	l
+	ret	z		;только 1 запись
+	push	hl
+	exx
+	ld	hl,Buf4SortDesc
+	pop	bc
+	ld	e,#00
+	exx
+	call	proc_07		;сортировка записей каталогов в буфере
+	exx
+	ld	e,#FF
+	exx
+	call	proc_07		;сортировка записей файлов в буфере
+
+;копирование результата в рабочий буфер
+	ld	hl,Buf4SortDesc
+	ld	de,Buf4Desc
+	ld	bc,#200
+	ldir
+	ret
+*/
+	ld	hl,(DescInDIR)
+	ld	a,h
+	or	l
+	ret	z			;пустой каталог
+	ld	hl,Buf4Desc
+	ld	b,h
+	ld	c,l
+	ld	e,#80
+	call	proc_07			;сортировка записей каталогов в буфере
+	ld	e,#00
+;	call	proc_07			;сортировка записей файлов в буфере
+;	ret
+
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+/*старый вариант
+;сортировка записей в буфере
+;вх:  hl' - адрес в целевом буфере
+;     bc' - количество записей
+;      e' =#00/#FF сортировать только каталоги/файлы
+;вых: bc' - количество записей
+;
+proc_07	ld	bc,Sym4Sort
+loop038	ld	hl,Buf4FirstSym
+	ld	de,Buf4Desc
+loop037	ld	a,(hl)
+	exx
+	xor	e
+	exx
+;	and	#10
+	and	#80
+	jr	z,goto093	;не каталог/файл
+	ld	a,(bc)
+	cp	#FF
+	jr	z,goto198		;любая буква
+	inc	hl
+	cp	(hl)
+	dec	hl
+	jr	nz,goto093
+goto198	ld	a,(de)
+	inc	de
+	exx
+	ld	(hl),a
+	inc	hl
+	exx
+	ld	a,(de)
+	inc	de
+	exx
+	ld	(hl),a
+	inc	hl
+
+goto095	dec	bc
+	ld	a,b
+	or	c
+	exx
+	jr	z,goto094
+	inc	hl
+	inc	hl
+	jr	loop037
+;следущая запись
+goto093	inc	de
+	inc	de
+	exx
+	jr	goto095
+;следующий символ
+goto094	exx
+	ld	bc,(DescInDIR)
+	exx
+	inc	bc
+	ld	a,(bc)
+	or	a
+	jr	nz,loop038
+
+	ret
+*/
+;сортировка записей одного типа в буфере
+;вх:  hl - адрес первой записи в буфере-источнике
+;     bc - адрес в целевом буфере
+;      e =#00/#80 сортировать только файлы/каталоги
+;вых: hl - новый адрес первой записи в буфере-источнике
+;     bc - очередной адрес в целевом буфере
+;
+proc_07	exx
+	ld	bc,Sym4Sort
+	exx
+loop074	inc	hl
+	inc	(hl)
+	dec	(hl)
+	dec	hl
+	ret	z			;конец каталога
+	push	hl
+loop073	ld	a,(hl)
+	inc	hl
+	xor	e
+	jp	m,goto199		;не сортируем
+	ex	af,af'
+	exx
+	ld	a,(bc)
+	exx
+	cp	#FF
+	jr	z,goto200		;любая буква
+	cp	(hl)
+	jr	nz,goto199		;не та буква
+goto200	dec	hl			;+0
+	ex	de,hl
+	ex	(sp),hl
+;  первый байт (номер записи, старший байт)
+	ldi
+	inc	bc
+	ex	af,af'
+	ld	(bc),a
+	inc	bc
+;  второй байт (первая буква)
+	ldi
+	inc	bc
+;  третий байт (номер записи, младший байт)
+	ld	a,(de)
+	ldi
+	inc	bc
+	ld	(bc),a
+	inc	bc
+	ex	(sp),hl
+	ex	de,hl
+;  следующая запись
+	inc	hl
+	ld	a,(hl)
+	dec	hl
+	or	a			;=#00 признак конца списка
+	jr	nz,loop073
+
+;следующий символ
+goto201	pop	hl
+	exx
+	inc	bc
+	ld	a,(bc)
+	exx
+	or	a
+	jr	nz,loop074
+	ret
+
+;следущая запись, при несовпадении буквы
+goto199	inc	hl
+	inc	hl			;+3
+	inc	hl			;+1 next
+	ld	a,(hl)
+	dec	hl			;+0 next
+	or	a			;=#00 признак конца списка
+	jr	nz,loop073
+	jr	goto201
+
+	endif
+
+;------------------------------------------------------------------------------
+GetNumOfEntries	ifused
+;подсчет количества легинтимных (первых 256) записей в текущем каталоге
+;вх:  (Ext4Found) - адрес списка расширений
+;вых: cy=1 ошибка чтения
+;     (DescInDIR),hl - количество найденных записей
+;
+;GetNumOfEntries
+;
+/*старый вариант
+	ld	hl,#0000		;номер в списке отображаемых записей
+	ld	(DescInDIR),hl		;количество найденных записей
+	ld	bc,#FFFF		;счетчик записей
+	push	hl
+loop035	inc	bc
+	call	ReadSectorDIR		;читаем сектор с заданным номером записи
+	jr	c,goto090
+	ex	de,hl			;de = Buf4DIR
+	ld	l,c			;номер записи в каталоге
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	add	hl,hl
+	ld	h,#00
+	add	hl,hl			;смещение в секторе
+	add	hl,de			;адрес дескриптора
+	ld	a,(hl)
+	or	a
+	jr	z,goto091		;конец каталога
+	call	CP_OneDot
+	jr	z,loop035		;запись: .
+	ld	a,(hl)
+	cp	#E5
+	jr	z,loop035		;удаленная запись
+	ex	af,af'			;первый символ записи
+	ld	de,#000B
+	add	hl,de
+	ld	a,(hl)			;атрибуты
+	cp	#0F
+	jr	z,loop035		;часть длинного имени
+	bit	3,a	
+	jr	nz,loop035		;метка тома
+	and	#10
+	jr	nz,goto092		;это каталог
+
+;сравнение расширения со списком
+	ld	de,(Ext4Found)
+	ld	a,(de)
+	or	a
+	jr	z,goto092		;отображаем всё
+loop036	ld	a,(de)
+	or	a
+	jr	z,loop035		;конец списка. с таким расширением не отображаем
+	push	de
+	push	hl
+	dec	hl
+	dec	hl
+	dec	hl
+	call	cmp_adrDE_adrHL_3b	 ;сравнение одного расширения
+	pop	hl
+	pop	de
+	inc	de
+	inc	de
+	inc	de
+	jr	nz,loop036
+
+;запись отображаем
+goto092	ld	a,(hl)			;атрибуты
+	pop	de			;номер в списке отображаемых записей
+	ld	hl,Buf4Desc		;список найденных номеров
+	add	hl,de
+	add	hl,de
+	ld	(hl),c
+	inc	hl
+	ld	(hl),b			;номер записи
+	ld	hl,Buf4FirstSym		;список первых букв и атрибутов
+	add	hl,de
+	add	hl,de
+	ld	(hl),a
+	inc	hl
+	ex	af,af'			;первый	 символ записи
+	ld	(hl),a
+	inc	de			;+1 найденная запись
+	push	de
+	ld	a,d
+;	cp	#01
+;	jr	c,loop035		;не более 256 записей
+	or	a
+	jr	z,loop035		;не более 256 записей
+	
+;конец поиска
+goto091	ld	a,errEoF
+goto090	pop	hl
+	ld	(DescInDIR),hl
+	cp	errEoF
+	ret	z
+	scf
+	ret
+*/
+;читаем первый сектор и проверяем наличие фиксированной записи
+	ld	bc,#0000		;номер первой записи в каталоге
+	call	ReadSectorDIR		;чтение сектора каталога в буфер по номеру записи
+	exx
+	ld	hl,#0000		;количество найденных записей
+	exx
+	ld	de,Buf4Desc
+	jr	c,goto197		;ошибка чтения
+	call	CP_OneDot		;hl=Buf4DIR
+	scf
+	jr	z,loop072		;cy=1, есть первая запись "."
+	or	a
+
+;сектор загружен, ищем совпадающую по имени запись
+loop072	call	findEntryInSector
+	ld	a,errEoF
+	jr	c,goto197		;найдено максимум записей/либо каталог закончился
+
+;грузим следующий сектор
+;bc - номер первой записи в следующем секторе
+	exx
+	push	hl
+	exx
+	push	de
+	call	ReadSectorDIR
+	pop	de
+	exx
+	pop	hl
+	exx
+	jr	nc,loop072
+
+;ошибка чтения/записи или другая, каталог закончился
+;a=errEoF каталог закончился
+;a - код ошибки
+goto197	inc	de
+	ex	de,hl
+	ld	(hl),#00
+	exx
+	ld	(DescInDIR),hl		;количество найденных записей
+	cp	errEoF
+	ret	z			;nc
+	scf
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;поиск записи в загруженном секторе
+;вх:  hl' - количество найденных записей
+;     hl = Buf4DIR (буфер с сектором)
+;     de = Buf4Desc+n (очередной адрес в буфере)
+;     bc - номер записи в каталоге (первая запись в секторе)
+;     cy=1 пропустить первую запись (для ссылки на себя (одна точка))
+;     (Ext4Found) - адрес списка расширений
+;вых: hl' - количество найденных записей
+;     de = Buf4Desc+n (очередной адрес в буфере)
+;     bc - номер очередной записи в каталоге
+;     hl,a,a' - ???
+;     cy=1 - найдено максимум записей/либо каталог закончился
+;
+findEntryInSector
+;
+;сектор загружен, ищем легинтимную запись
+	push	de
+	jr	c,goto193		;пропуск первой записи
+loop070	ld	a,(hl)
+	or	a
+	jr	z,goto194		;пустая запись. конец каталога
+	cp	#E5
+	jr	z,goto193		;удаленная запись
+	ex	af,af'			;первый символ записи
+	ld	de,#000B
+	add	hl,de
+	ld	a,(hl)			;атрибуты
+	sbc	hl,de
+	cp	#0F
+	jr	z,goto193		;часть длинного имени
+	bit	3,a	
+	jr	nz,goto193		;метка тома
+	set	7,b			;признак каталога
+	and	#10
+	jr	nz,goto195		;это каталог, отображаем всегда
+	res	7,b			;признак файла
+
+;сравнение расширения со списком
+	ld	de,(Ext4Found)
+	ld	a,(de)
+	or	a
+	jr	z,goto195		;отображаем всё
+	push	bc
+	ld	bc,#0008
+loop071	ld	a,(de)
+	or	a
+	jr	z,goto196		;конец списка. с таким расширением не отображаем
+	push	de
+	push	hl
+	add	hl,bc
+	call	cmp_adrDE_adrHL_3b 	;сравнение одного расширения
+	pop	hl
+	pop	de
+	inc	de
+	inc	de
+	inc	de
+	jr	nz,loop071
+	pop	bc
+
+;запись отображаем
+goto195	ex	(sp),hl
+	ld	(hl),b			;номер записи (старший байт)
+	res	7,b
+	inc	hl
+	ex	af,af'
+	ld	(hl),a			;номер записи (первая буква)
+	inc	hl
+	ld	(hl),c			;номер записи (младший байт)
+	inc	hl
+/*
+	inc	h
+	inc	h
+	ld	(hl),b
+	inc	hl
+	ex	af,af'
+	ld	(hl),a
+	dec	hl
+	dec	h
+	dec	h
+	res	7,b
+	ld	(hl),c			;номер записи (младший байт)
+	inc	hl
+	ld	(hl),b			;номер записи (старший байт)
+	inc	hl
+*/
+	ex	(sp),hl
+	exx
+	inc	hl			;+1 найденная запись
+	ld	a,h
+	exx
+	dec	a
+	jr	z,goto194		;найдено максимум записей
+
+;следующая запись в секторе
+	push	bc
+goto196	pop	bc
+goto193	inc	bc
+	bit	7,b
+	jr	nz,goto194		;больше искать не можем, переполнение
+	ld	de,#0020
+	add	hl,de
+	ld	de,Buf4DIR+#200
+	sbc	hl,de
+	add	hl,de
+	jr	nz,loop070
+
+;сектор кончился
+	pop	de
+	xor	a
+	ret
+
+;найдено максимум записей/либо каталог закончился
+goto194	pop	de
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatCreateDIR	ifused
+;создание каталога в текущем FAT32 каталоге
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType=1
+;  fcbSize=#00000000
+;вх:  ix - адрес буфера fcb
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       a=errFileExist
+;       a=errDiskNoSpace
+;       a=errNumTooBig - слишком большой размер
+;     cy=0 запись внесена в катлог
+;
+;fatCreateDIR
+;
+	ld	hl,#0000
+	jr	fatCreateDIRlfn
+	org	$-2
+	endif
+
+
+fatCreateDIRlfn		ifused
+;создание каталога с длинным именем в текущем FAT32 каталоге
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsDIR, bit4 fcbType=1
+;вх:  ix - адрес буфера fcb
+;     hl - адрес строки с длинным именем в формате ASCIIZ
+;       =#0000 использовать короткое имя из fcb
+;
+;fatCreateDIRlfn
+;
+;fcbSize=#00000000
+	push	hl
+	call	SetZeroDEHL
+	call	DEHL2fcbSize
+	pop	hl
+
+;создадим запись каталога длиной один кластер
+	call	fatCreateFileLFN
+	ret	c
+
+;очистим кластер каталога
+	call	LD_DEHL_fcbClsFile
+	push	ix
+	ld	ix,Buf4MBR
+	call	fatClearCls
+	pop	ix
+	ret	c
+
+;создадим в этом каталоге запись со ссылкой на себя
+;  скопируем fcb во временную область
+	push	ix
+	pop	hl
+	ld	de,tmp_fcb
+	push	de
+	ld	bc,#0020
+	ldir
+	ex	(sp),ix
+;  установим имя записи
+	ld	hl,tmp_fcb
+	ld	(hl),"."
+	ld	b,#0B-1
+loop029	inc	hl
+	ld	(hl),#20
+	djnz	loop029
+;  ссылка на себя
+	call	fcbClsFile2fcbClsDIR
+	call	addFileEntry
+	jr	c,goto049
+
+;создадим в этом каталоге запись со ссылкой на родителя
+	ld	(ix+fcbName+1),"."
+	pop	hl
+	push	hl		;адрес fcb
+	ld	bc,fcbClsDIR
+	add	hl,bc		;адрес fcbClsDIR
+	ld	de,RootClaster
+	call	cmp_adrDE_adrHL
+	ld	de,tmp_fcb+fcbClsFile
+	call	nz,CopyDWORD_HL_DE
+	call	SetZeroDEHL
+	call	z,DEHL2fcbClsFile
+	call	addFileEntry
+goto049	pop	ix
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatFindEntryDir	ifused
+;поиск записи в текущем каталоге по имени в формате name[.][ext]\
+;  имя должно быть проверено и переведено в верхний регистр
+;вх:  hl - адрес имени в формате name[.][ext]\ (или в формате 8+3)
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty - пустой корневой каталог
+;       hl - адрес следующего имени в пути
+;       bc - номер записи в каталоге на которой прервался поиск
+;     nc, z запись найдена
+;       hl - адрес следующего имени в пути (указывает на "\")
+;       de - адрес дескриптора в буфере
+;       bc - номер проверяемой записи в каталоге
+;       (DescInCurrDir) - номер последней записи в каталоге
+;     nc, nz запись не найдена
+;       hl - адрес следующего имени в пути
+;       bc - номер последней записи в каталоге
+;       (DescInCurrDir) - номер последней записи в каталоге
+;
+;fatFindEntryDir
+;
+;формируем имя файла для поиска в каталоге
+	ld	de,Name4Find
+	call	FileNameTo8dot3	;hl - адрес следующего имени в пути
+
+;читаем первый сектор и проверяем наличие фиксированной записи
+	push	hl
+	ld	c,b		;bc=#0000 номер текущей записи в каталоге
+	call	ReadSectorDIR	;чтение сектора каталога в буфер по номеру записи
+	jr	c,goto065	;ошибка
+	call	CP_OneDot	;hl=Buf4DIR
+	jr	z,loop028	;есть первая запись "."
+	ld	a,(hl)
+	or	a
+;	ld	a,errFileEmpty	;пустой каталог (это может быть только корневой)
+;	jr	z,goto065
+	jr	z,goto129
+
+
+;сектор загружен, ищем совпадающую по имени запись
+loop028	push	bc		;номер записи
+	ld	c,#00		;номер записи в секторе
+loop027	ld	de,#000B
+	add	hl,de
+	ld	a,(hl)		;атрибуты
+	sbc	hl,de
+	ld	e,(hl)		;первый символ имени
+	cp	#0F
+	jr	z,goto066	;это часть длинного имени
+	cp	#08
+	jr	z,goto066	;Volume ID
+	ld	a,e
+	or	a
+	jr	z,goto067	;пустая запись. записи закончились
+	cp	#E5
+	jr	z,goto066	;удаленная запись
+;  сравнение имени с заданным в Name4Find
+;  hl - адрес дескриптора в буфере
+	ld	de,Name4Find
+	ld	b,#0B
+	push	hl
+loop026	ld	a,(de)		;переводим в верхний регистр
+	cp	(hl)
+	jr	nz,goto068
+	inc	de
+	inc	hl
+	djnz	loop026
+;  запись найдена
+	pop	de		;адрес дескриптора в буфере
+	pop	hl		;номер проверяемой записи в каталоге
+	add	hl,bc		;+номер записи в секторе
+	ld	c,l
+	ld	b,h		;номер найденной записи в каталоге
+	xor	a		;nc z
+	jr	goto183
+;  следующая запись в секторе
+goto068	pop	hl
+goto066	ld	de,#0020
+	add	hl,de
+	inc	c
+	ld	a,c
+	cp	#10
+	jr	c,loop027
+
+
+;запись в секторе не найдена, грузим следующий сектор
+	pop	hl
+	ld	b,d
+	add	hl,bc
+	ld	c,l
+	ld	b,h		;номер первой записи в следующем секторе
+	call	ReadSectorDIR
+	jr	nc,loop028
+	cp	errEoF
+	jr	z,goto129
+
+
+;ошибка чтения/записи или другая
+goto065	pop	hl
+	scf
+	ret
+
+
+;nc, nz запись не найдена
+goto067	pop	bc
+goto129	xor	a
+	inc	a		;nc, nz
+goto183	pop	hl
+	ld	(DescInCurrDir),bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+CP_TwoDot	ifused
+;проверка имени файла на две точки (ссылка на родителя)
+;вх:  hl - адрес начала записи файла
+;вых: nz - нет совпадения
+;      z - это вторая запись -> a=#00, nc
+;
+;CP_TwoDot
+;
+	ld	a,(hl)
+	cp	"."
+	ret	nz
+	inc	hl
+	ld	a,(hl)
+	dec	hl
+	cp	"."
+	ret	nz
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+CP_OneDot	ifused
+;проверка имени файла на одну точка (ссылка на себя)
+;вх:  hl - адрес начала записи файла
+;вых: nz - нет совпадения
+;      z - это первая запись -> a=#00, nc
+;
+;CP_OneDot
+;
+	ld	a,(hl)
+	cp	"."
+	ret	nz
+	inc	hl
+	ld	a,(hl)
+	dec	hl
+	cp	" "
+	ret	nz
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+ReadSectorDIR	ifused
+;чтение сектора каталога в буфер по номеру записи
+;вх:  bc - номер записи в каталоге
+;вых: cy=1 ошибка чтения/записи
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;     cy=0 сектор прочитан
+;       hl=Buf4DIR
+;     bc не меняется
+;     hl',de',bc' - ???
+;
+;ReadSectorDIR
+;
+	push	bc
+	ld	h,b
+	ld	l,c
+	ld	de,#0000
+	ld	a,#10
+	call	SRL_dehl_A	;dehl=dehl/32
+	ld	a,l		;смещение в секторах от начала каталога
+	push	af
+	ld	a,(LenCLSInSec)	;размер кластера в секторах
+	push	af
+	call	SRL_dehl_A	;hl смещение в кластерах от начала каталога
+	ld	c,l
+	ld	b,h
+	ld	de,(CLS_CurrDir+2)
+	ld	hl,(CLS_CurrDir);dehl номер первого кластера каталога
+	call	FindCLSinFile	;поиск номера кластера по смещению от начала файла/каталога
+	jr	c,goto059	;ошибки
+	jr	nz,goto058	;кластер найден
+goto059	pop	bc		;выход по ошибке
+	pop	bc
+	pop	bc
+	ret
+
+;расчет адреса сектора и загрузка в буфер
+goto058	call	GetAdrRealSector
+	pop	af		;dehl - адрес сектора
+				;a - размер кластера в секторах
+	dec	a
+	ld	c,a
+	pop	af		;смещение в секторах от начала каталога
+	and	c
+	ld	c,a
+	ld	b,#00		;смещение в кластере
+	add	hl,bc
+	ex	de,hl
+	ld	c,b
+	adc	hl,bc
+	ex	de,hl		;dehl - адрес сектора с дескриптором файла
+	call	LoadSecDIR2Buf
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+fatSetTmpDir	ifused
+;установка временной текущей директории
+;вх:  hl - адрес начала дескриптора
+;вых: hl,bc,a - ???
+;
+;fatSetTmpDir
+;
+	push	de
+	ld	de,#0014
+	add	hl,de
+	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)		;номер кластера (старшее слово)
+	ld	e,#05
+	add	hl,de
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)		;номер кластера (младшее слово)
+	ld	a,b
+	or	c
+	or	d
+	or	e
+	jr	nz,goto056
+	ld	de,(RootClaster);ошибка в номере кластера. переходим в корень
+	ld	bc,(RootClaster+2)
+goto056	ld	(CLS_CurrDir),de
+	ld	(CLS_CurrDir+2),bc
+	pop	de
+	ret
+
+	endif
+
+;==============================================================================

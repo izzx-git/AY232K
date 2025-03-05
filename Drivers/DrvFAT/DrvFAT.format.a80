@@ -1,0 +1,282 @@
+;Процедуры  FAT Driver. создание и форматирование раздела
+;файл DrvFAT.format.a80
+;
+;fatFormatPart		форматирование раздела FAT
+;
+;------------------------------------------------------------------------------
+fatFormatPart	ifused
+;форматирование раздела FAT
+;вх:  a - размер кластера (=#01/#02/#04/#08/#10/#20/#40/#80)
+;         =#00 автоматический расчет исходя из объема раздела
+;     hl - адрес дескриптора раздела (не должен лежать в xEBF5)
+;вых: cy=1 были ошибки
+;       a=errHddNotFound
+;       a=errHddRWerror
+;       a=errHddBusy
+;       a=errHddNotReady
+;       a=errHddNotData
+;
+;fatFormatPart
+;
+	call	DeinitFATpart
+
+;сформируем boot sector
+	push	af
+	push	hl
+	ld	hl,BootSecFAT32
+	ld	de,Buf4Format
+	ld	bc,#005A
+	ldir
+	ld	h,d
+	ld	l,e
+	inc	de
+	ld	(hl),b
+	ld	bc,#05A3
+	ldir
+	ld	hl,#AA55
+	ld	(Buf4Format+#1FE),hl
+	pop	hl
+;  запомним начало раздела
+	ld	c,#04
+	add	hl,bc
+	add	hl,bc
+	ld	de,tmpDWORD
+	ldir
+;  секторов в разделе
+	ld	de,Buf4Format+#20
+	ld	c,#04
+	ldir
+;  секторов в кластере
+	pop	af
+	ld	bc,(Buf4Format+#20+2)
+	or	a
+	jr	nz,goto140
+	ld	hl,TablCLS
+	ld	a,#80
+loop053	rrca
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	inc	hl
+	ex	de,hl
+	sbc	hl,bc
+	ex	de,hl
+	jr	nc,loop053
+goto140	ld	(Buf4Format+#0D),a	;секторов в кластере
+;  размер FAT в секторах
+;  (((секторов в разделе-зарезервированных)/секторов в кластере+1)/(512/4))+1
+	ld	d,b
+	ld	e,c
+	ld	hl,(Buf4Format+#20)	;dehl - размер раздела в секторах
+	ld	bc,(Buf4Format+#0E)	;bc - зарезервированных секторов
+	or	a
+	sbc	hl,bc
+	jr	nc,goto141
+	dec	de
+goto141	call	SRL_dehl_A		;dehl=dehl/a
+	call	Inc_DEHL		;dehl+1
+	ld	a,#80
+	call	SRL_dehl_A		;dehl=dehl/#80
+	call	Inc_DEHL		;dehl+1 (размер FAT таблицы)
+	ld	(Buf4Format+#24),hl	;размер FAT таблицы
+	ld	(Buf4Format+#24+2),de
+;  сформируем сектор FS-Info
+	ld	hl,FSinfoSecFAT32
+	ld	de,Buf4Format+#200
+	ld	bc,#0004
+	ldir
+	ld	de,Buf4Format+#200+#1E4
+	ld	c,#0C
+	ldir
+	ld	hl,#AA55
+	ld	(Buf4Format+#3FE),hl
+;  запишем двенадцать секторов (два раза по шесть)
+	ld	hl,tmpDWORD
+	call	LD_DEHL_adrHL		;адрес начала раздела
+	call	proc_12
+	call	nc,proc_12
+	ret	c			;ошибки записи
+
+;обнулим оставшиеся зарезервированные сектора, обе копии FAT, корневой каталог
+	push	de
+	push	hl
+	exx
+	ld	bc,#20-#06-#06		;оставшееся из зарезервированного
+	ld	a,(Buf4Format+#0D)	;секторов в кластере
+	add	a,c
+	ld	c,a
+	ld	hl,(Buf4Format+#24)	;размер FAT таблицы
+	ld	de,(Buf4Format+#24+2)
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl			;размер FAT таблицы *2
+	add	hl,bc
+	jr	nc,loop054
+	inc	de			;dehl количество секторов для обнуления
+loop054	push	hl
+	push	de
+	exx
+	call	proc_13
+	dw	Buf4Format+#400
+	exx
+	pop	de
+	pop	hl
+	jr	c,goto143
+	call	Dec_DEHL
+	ld	a,d
+	or	e
+	or	h
+	or	l
+	jr	nz,loop054
+
+;пропишем в таблице FAT базовые номера
+	ld	b,#0A
+	ld	hl,Buf4Format+#400
+	ld	(hl),#F8
+	inc	hl
+loop055	ld	(hl),#FF
+	inc	hl
+	djnz	loop055
+	ld	a,#0F
+	ld	(hl),a
+	ld	(Buf4Format+#400+#03),a
+	pop	hl
+	pop	de
+	ld	bc,#20-#06-#06		;оставшееся из зарезервированного
+	add	hl,bc
+	jr	nc,goto142
+	inc	de
+goto142	ld	c,#01
+	call	proc_13
+	dw	Buf4Format+#400
+	ret	c
+	ld	bc,Buf4Format+#24
+	call	Add_DEHL_adrBC
+	call	Dec_DEHL
+	ld	bc,#0001
+	call	proc_13
+	dw	Buf4Format+#400
+	ret	
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;запись шести секторов: boot, FSinfo, 4 пустых
+;вх:  dehl - LBA адрес первого сектора
+;вых: cy=1 ошибки записи
+;     cy=0 данные записаны успешно
+;     dehl=dehl+#06
+;     bc=#0001
+;
+proc_12	ld	bc,#0003
+	call	proc_13
+	dw	Buf4Format
+	ret	c
+	ld	bc,#0301
+loop056	push	bc
+	ld	b,#00
+	call	proc_13
+	dw	Buf4Format+#400
+	pop	bc
+	ret	c
+	djnz	loop056
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;запись группы секторов
+;вх:  dehl - LBA адрес первого сектора
+;     bc - количество секторов для записи
+;     dw #nnnn - адрес буфера, откуда пишем
+;вых: cy=1 ошибки записи
+;     cy=0 данные записаны успешно
+;     dehl=dehl+bc
+;     bc - не меняется
+;
+proc_13	ex	(sp),hl
+	push	de
+	pop	af
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	inc	hl
+	ex	(sp),hl
+	push	hl
+	push	af
+	push	bc
+	push	bc
+	push	de
+	push	af
+	pop	de
+	hddSetCurrSec
+	pop	hl
+	pop	bc
+	ld	b,c
+	scf
+	DirectRdWrSectors
+	pop	bc
+goto143	pop	de
+	pop	hl
+	ret	c
+	add	hl,bc
+	ret	nc
+	inc	de
+	or	a
+	ret
+
+	endif	
+
+;==============================================================================
+;шаблон для boot sector FAT32
+BootSecFAT32	ifused
+;
+ db #EB,#3C,#90		;+#00..#02 Jump code
+ db "MSDOS5.0"		;+#03..#0A OEM Name
+ dw #200		;+#0B Bytes per sector
+ db #00;?		;+#0D sectors_per_cluster
+ dw #0020		;+#0E зарезервировано секторов
+ db #02			;+#10 количество копий FAT
+ dw #0000		;+#11 количество записей в корневом каталоге =0 для FAT32
+ dw #0000;?		;+#13 Total sectors (use FAT32 count instead)
+ db #F8			;+#15 Media type
+ dw #0000		;+#16 Count of sectors used by the FAT table (FAT16 only)
+ dw #003F		;+#18 Sectors per track (default)
+ dw #00FF		;+#1A Heads (default)
+ dd #00000000		;+#1C Hidden sectors
+ dd #00000000;?		;+#20 Total sectors for this volume
+ dd #00000000;?		;+#24 BPB_FATSz32 (размер FAT в секторах)
+ dw #0000		;+#28 BPB_ExtFlags
+ dw #0000		;+#2A BPB_FSVer
+ dd #00000002		;+#2C BPB_RootClus
+ dw #0001		;+#30 BPB_FSInfo
+ dw #0006		;+#32 BPB_BkBootSec
+ ds #0C,#00		;+#34..#3F free
+ db #00			;+#40 Drive number
+ db #00			;+#41 free
+ db #29			;+#42 Boot signature
+ db #12,#34,#56,#78	;+#43..#46 Volume ID
+ db "ZS-Scorpion"	;+#47..#51 Volume name
+ db "FAT32   "		;+#52..59 File sys type
+; ds #1A4,#00		;+#5A..#1FD free
+; db #55,#AA		;+#1FE Signature
+	endif
+
+;шаблон для fsinfo сектора
+FSinfoSecFAT32	ifused
+;
+ db "RRaA"		;+#00..#03 сигнатура
+ db "rrAa"		;+#1E4..#1E7 сигнатура
+ db #FF,#FF,#FF,#FF	;+#1E8..#1EB Free Count
+ db #FF,#FF,#FF,#FF	;+#1EC..#1EF Next Free
+	endif
+
+;таблица для расчета количества секторов в кластере	
+;
+TablCLS	ifused
+	dw #03FF
+	dw #01FF
+	dw #00FF
+	dw #0007
+	dw #0003
+	dw #0001
+	dw #0000
+	endif
+;==============================================================================

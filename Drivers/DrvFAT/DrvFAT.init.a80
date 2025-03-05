@@ -1,0 +1,267 @@
+;Процедуры  FAT Driver. Инициализация переменных FAT32 раздела.
+;файл DrvFAT.init.a80
+;
+;InitCurrMountFAT	инициализация раздела FAT с текущим подключенным образом
+;InitCurrFAT		инициализация текущего раздела FAT при необходимости
+;InitFAT32		инициализация раздела FAT
+;InitFATpartition	инициализация переменных выбранного раздела FAT
+;setRootDir		установка корневого каталога текущим
+;DeinitFATpart		деинициализация переменных раздела FAT
+;DeinitFATbuf		деинициализация буферов раздела FAT
+;
+;------------------------------------------------------------------------------
+	IFDEF	forProfROM
+;инициализация раздела FAT с текущим подключенным образом
+;вых: cy=1 ошибка инициализации
+;       a=errRWnum
+;       a=errInvalidPart
+;     cy =0, nz - раздел инициализирован
+;     cy =0, z - раздел не требовал инициализации
+;
+InitCurrMountFAT
+;
+;	ld	a,(xE590+#05)	;раздел с образом
+	ld	a,(xE590+#15)	;раздел с образом
+	and	#7F
+	jr	InitFAT32
+
+	ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	IFDEF	forRRL
+InitCurrMountFAT
+;
+;	 ld	a,(descCurrFDD+#05)	;раздел с образом
+	 ld	a,(descCurrFDD+#15)	;раздел с образом
+	 and	#7F
+	 jr	InitFAT32
+	ENDIF
+
+
+;------------------------------------------------------------------------------
+InitCurrFAT	ifused
+;инициализация текущего раздела FAT при необходимости
+;вых: cy=1 ошибка инициализации
+;       a=errRWnum
+;       a=errInvalidPart
+;     cy =0, nz - раздел инициализирован
+;     cy =0, z - раздел не требовал инициализации
+;
+;InitCurrFAT
+;
+	ld	a,(PartitionNum)	;выбранный раздел
+	jr	InitFAT32
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+InitFAT32	ifused
+;инициализация раздела FAT
+;вх:  a - номер раздела
+;вых: cy=1 ошибка инициализации
+;       a=errRWnum
+;       a=errInvalidPart
+;     cy =0, nz - раздел инициализирован
+;     cy =0, z - раздел не требовал инициализации
+;
+;InitFAT32
+;
+goto028	push	hl
+	push	de
+	ld	hl,CurrentPart		;проиницилизированный раздел
+	cp	(hl)
+	ld	(PartitionNum),a
+;	jr	z,goto027
+	jr	z,goto139
+	ld	l,a
+	call	GetAdrMFSorFAT
+	call	nc,InitFATpartition
+goto027	pop	de
+	pop	hl
+	ret
+goto139	
+;	call	setRootDir
+	SetHDDpart
+	ld	a,errHddNotFound
+	jr	goto027
+
+	endif
+
+;------------------------------------------------------------------------------
+InitFATpartition	ifused
+;инициализация переменных выбранного раздела FAT
+;вх:  dehl - LBA адрес первого сектора раздела
+;вых: cy =1 - ошибка инициализации
+;       a=errRWnum
+;       a=errInvalidPart
+;     cy =0, nz - раздел инициализирован
+;     dehl - номер кластера корня
+;
+;InitFATpartition
+;
+	call	DeinitFATpart		;деинициализация раздела FAT32
+	ld	(AdrPartBegin),hl
+	ld	(AdrPartBegin+2),de	;адрес начала раздела
+	call	LoadSecDIR2Buf		;читам сектор 0 раздела
+	ret	c			;ошибка чтения
+	push	hl
+	ex	(sp),ix			;ix адрес буфера с сектором
+
+;проверка 0 сектора раздела FAT на валидность
+	ld	hl,(Buf4DIR+#1FE)
+	ld	de,#AA55
+	or	a
+	sbc	hl,de
+	jp	nz,goto024		;ошибка. нет сигнатуры
+;  проверим количество байт в секторе
+	ld	a,(ix+BPB_BytesPerSec+1)
+	sub	#02
+	or	(ix+BPB_BytesPerSec)
+	jp	nz,goto024		;сектора более 512b не поддерживаются
+;  количество секторов в кластере
+	ld	d,(ix+BPB_SecPerClus)
+	or	d
+	jp	z,goto024		;неверное значение
+	neg
+	and	d
+	cp	d
+	jp	nz,goto024		;неверное значение
+	ld	a,d
+	ld	(LenCLSInSec),a
+;  количество секторов одной FAT таблицы
+	ld	hl,(Buf4DIR+BPB_FATSz16)
+	ld	a,l
+	or	h
+	jp	nz,goto024		;это не FAT32
+	ld	hl,(Buf4DIR+BPB_FATSz32)
+	ld	(LenFATinSec),hl
+	ld	hl,(Buf4DIR+BPB_FATSz32+2)
+	ld	(LenFATinSec+2),hl
+;  смещение сектора FSInfo
+	ld	hl,(Buf4DIR+BPB_FAT32_FsInfo)
+	ld	(AdrFsInfo),hl
+;  количество секторов на разделе
+	ld	hl,(Buf4DIR+BPB_TotSec16)
+	ld	a,l
+	or	h
+	jr	nz,goto024		;FAT16 не поддерживаем
+	ld	hl,(Buf4DIR+BPB_TotSec32)
+	ld	(LenOfPartFAT),hl
+	ld	hl,(Buf4DIR+BPB_TotSec32+2)
+	ld	(LenOfPartFAT+2),hl
+;  количество копий FAT
+	ld	a,(ix+BPB_NumFATs)
+	ld	(NumsFATonPart),a
+	dec	a
+	cp	#07
+	jp	nc,goto024		;нет FAT таблиц
+	inc	a
+;  адрес начала данных
+	ld	hl,(LenFATinSec)
+	ld	de,(LenFATinSec+2)
+	dec	a
+	jr	z,goto025
+loop011	add	hl,hl			;!!!неверно для копий FAT выше 3х
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+	dec	a
+	jr	nz,loop011
+goto025	ld	bc,(Buf4DIR+BPB_RsvdSecCnt)
+	push	bc
+	add	hl,bc
+	jr	nc,goto026
+	inc	de
+goto026	ld	(AdrDataBegin),hl
+	ld	(AdrDataBegin+2),de	;номер первого сектора данных
+;  адрес корневой директории
+	ld	hl,(Buf4DIR+BPB_RootClus)
+	ld	de,(Buf4DIR+BPB_RootClus+2)
+	ld	(RootClaster),hl
+	ld	(RootClaster+2),de
+	ld	(CLS_CurrDir),hl
+	ld	(CLS_CurrDir+2),de
+;  адрес первой FAT
+	ex	(sp),hl			;количество зарезервированных секторов
+	push	de
+	ld	de,#0000		
+	ld	bc,AdrPartBegin
+	call	Add_DEHL_adrBC
+	ld	(AdrFATonHDD),hl
+	ld	(AdrFATonHDD+2),de
+
+;номер текущего раздела
+	ld	a,(PartitionNum)
+	ld	(CurrentPart),a
+;	ld	hl,"/"*#100+#02
+;	ld	(CurrentPath),hl
+	xor	a
+	ld	(CurrentLevel),a	;глубина пути к текущему каталогу
+	inc	a
+	pop	de
+	pop	hl
+	pop	ix
+	ret
+goto024	ld	a,errInvalidPart
+	scf
+	pop	ix
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+setRootDir	ifused
+;установка корневого каталога текущим
+;вых: ---
+;
+;setRootDir
+;
+	push	hl
+	push	de
+	ld	hl,"/"*#100+#02
+	ld	(CurrentPath),hl
+	ld	l,#00
+	ld	(CurrentPath+2),hl
+	ld	hl,RootClaster
+	ld	de,CLS_CurrDir
+	call	CopyDWORD_HL_DE
+	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+DeinitFATpart	ifused
+;деинициализация переменных раздела FAT
+;
+;DeinitFATpart
+;
+	push	af
+	ld	a,#FF
+	ld	(CurrentPart),a
+	pop	af
+	jr	DeinitFATbuf
+	org	$-2
+
+	endif
+	
+;------------------------------------------------------------------------------
+DeinitFATbuf	ifused
+;деинициализация буферов раздела FAT
+;
+;DeinitFATbuf
+;
+	push	af
+	ld	a,#FF
+	ld	(SecFATinBuf+3),a
+	ld	(SecDIRinBuf+3),a
+	ld	(SecFileInBuf+3),a
+	ld	(NumFstCluster+3),a
+	pop	af
+	ret
+
+	endif
+
+;==============================================================================

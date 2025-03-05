@@ -1,0 +1,21 @@
+	LUA
+
+	local nameflog = "DrvFAT.lua.info"
+	local flog = nil
+	local blname={}
+	blname[1] ="DrvFAT.Start"
+	blname[2] ="DrvFAT.End"
+
+	if flog==nil then flog=io.open(nameflog,"w") end
+	
+	plen = sj.get_label(blname[1])
+	flog:write("адрес начала DrvFAT32","\t"," = ",string.format('0x%04X', plen)," = ",plen,"\n")
+
+	plen = sj.get_label(blname[2]) - sj.get_label(blname[1])
+	flog:write("полная длина драйвера","\t"," = ",string.format('0x%04X', plen)," = ",plen,"\n")
+
+	flog:flush ()
+
+	ENDLUA
+
+

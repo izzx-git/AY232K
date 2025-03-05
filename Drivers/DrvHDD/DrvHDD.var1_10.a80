@@ -1,0 +1,163 @@
+;Переменные HDD Driver
+;файл DrvHDD.var.a80
+;
+;установка маски контроллеров (для корректной установки керналя)
+;доступность контроллера
+;0,=1 SMUC v2
+;1,=1 SMUC v1 (shadow)
+;2,=1 Nemo
+;3,=1 Nemo A8
+;4,=1 ATM-IDE
+;5,=1 PROFI IDE
+;6,=1 Z-Controller
+;7,=1 DivMMC
+;
+devMask	=	#00
+devNums	=	#00
+	IFDEF	SMUCv2		;поддержка SMUC v2
+devMask	=	devMask+#01
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	SMUCv1		;поддержка SMUC v1 (через теневые порты)
+devMask	=	devMask+#02
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	NemoStd		;поддержка NEMO
+devMask	=	devMask+#04
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	NemoA8		;поддержка NEMO A8
+devMask	=	devMask+#08
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	ATMide		;поддержка ATM-IDE
+devMask	=	devMask+#10
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	PROFIide	;поддержка PROFI-IDE
+devMask	=	devMask+#20
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	ZC		;поддержка Z-Controller
+devMask	=	devMask+#40
+devNums	=	devNums+#01
+	ENDIF
+	IFDEF	DivMMC		;поддержка DivMMC
+devMask	=	devMask+#80
+devNums	=	devNums+#01
+	ENDIF
+	
+;------------------------------------------------------------------------------
+;номер текущего контроллера и винчестера (в формате PartitionNum)
+;в драйвере используются только биты 5-3,2
+;7,=0/1 тип раздела MFS/FAT
+;6,=1 раздел есть            543
+;5-3,=??? номер устройства: =000 SMUC v2
+;                           =001 SMUC v1
+;                           =010 Nemo
+;                           =011 Nemo A8
+;                           =100 ATM IDE
+;                           =101 PROFI-IDE
+;                           =110 SD ZC
+;                           =111 SD DivMMC
+;2,=0/1 hdd master/slave
+;0..1,=?? номер раздела
+;
+drvDevice	db	#FF
+
+;------------------------------------------------------------------------------
+;блок переменных для записи в порты винчестера
+idePort1F1	db	0	;регистр дополнительных возможностей #1F1/#F9BE (не реализовано)
+secCounter
+idePort1F2	db	0	;регистр счетчика секторов #1F2/#FABE
+idePort1F3	db	0	;CHS номер сектора/LBA 7:0 #1F3/#FBBE
+idePort1F4	db	0	;CHS номер цилиндра low/LBA 15:8 #1F4/#FCBE
+idePort1F5	db	0	;CHS номер цилиндра high/LBA 23:16 #1F5/#FDBE
+idePort1F6	db	0	;CHS номер головки/LBA 27:24 #1F6/#FEBE
+				; 4,=0/1 текущий винчестер master/slave
+				; 5,=1 всегда
+				; 6,=0/1 это CHS/LBA адрес
+				; 7,=1 всегда
+idePort1F7r	db	#20	;регистр команд (чтение сектора)
+idePort1F7w	db	#30	;регистр команд (запись сектора)
+idePort1F7i	db	#90	;регистр команд (идентификация)
+idePortErrCnt	db	#01	;количество попыток чтения/записи сектора
+AdrLBA32	ifused
+		 dd	0	;LBA32 номер сектора
+		endif
+
+;------------------------------------------------------------------------------
+;блок переменных геометрии текущего устройства
+;+#0A параметры устройства
+;7,=1 винчестер/SD найден
+;6,=1 есть поддержка LBA
+;5,=1 есть поддержка CHS
+;4,=0/1 для SD/HDD master/slave
+;3,=0/1 поддержка LBA32 off/on
+;2,=0/1 для SD байтовая/блочная адресация
+;1-0,=00 нет таблицы разделов
+;    =10 один раздел с начала диска
+;    =01 структура MBR
+;    =11 структура GPT
+;
+CurrentDev
+devCylinders	dw 0		;+#00 2 значение Cylinders HDD
+devHeads	db 0		;+#02 1 значение head HDD
+devSectors	db 0		;+#03 1 значение sector HDD
+devHmulS	dw 0		;+#04 2 произведение head * sectors
+devLBAsec	dd 0		;+#06 4 кол-во секторов LBA
+devFlags	db %00000000	;+#0A 1 параметры устройства
+EndCurrentDev
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;блоки переменных геометрии всех возможных винчестеров
+	IFNDEF	DrvHddExtVars
+	 IFDEF	SMUC
+msSMUC	  ds	11		;SMUC master
+slSMUC	  ds	11		;SMUC slave
+	 ENDIF
+	 IFDEF	NEMO
+msNemo	  ds	11		;Nemo master
+slNemo	  ds	11		;Nemo slave
+	 ENDIF
+	 IFDEF	ATMide
+msATM	  ds	11		;ATM IDE master
+slATM	  ds	11		;ATM IDE slave
+	 ENDIF
+	 IFDEF	PROFIide
+msPROFI	  ds	11		;Profi IDE master
+slPROFI	  ds	11		;Profi IDE slave
+	 ENDIF
+	 IFDEF	ZC
+cardZC	  ds	11		;ZC SD карта
+	 ENDIF
+	 IFDEF	DivMMC
+mDivMMC	  ds	11		;DivMMC master
+sDivMMC	  ds	11		;DivMMC slave
+	 ENDIF
+	ENDIF
+
+;------------------------------------------------------------------------------
+;таблица адресов блоков переменных винчестеров/SD карт
+tblDev	dw	msSMUC
+	dw	slSMUC
+	dw	msSMUC
+	dw	slSMUC
+	dw	msNemo
+	dw	slNemo
+	dw	msNemo
+	dw	slNemo
+	dw	msATM
+	dw	slATM
+	dw	msPROFI
+	dw	slPROFI
+	dw	cardZC
+	dw	cardZC
+	dw	mDivMMC
+	dw	sDivMMC
+
+;------------------------------------------------------------------------------
+;код ошибки
+ideError	db 0
+
+;==============================================================================

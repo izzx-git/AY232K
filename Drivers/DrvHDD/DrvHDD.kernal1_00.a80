@@ -1,0 +1,345 @@
+;Переменные HDD Driver
+;файл DrvHDD.var.a80
+;
+;hddSetVars		установка переменных выбранного винчестера Master/Slave
+;hddSetIde		установка керналя заданного контроллера IDE
+;
+;------------------------------------------------------------------------------
+hddSetVars	ifused
+;установка переменных выбранного винчестера Master/Slave
+;вх:  (selHdd) - номер бита соответствет винчестеру
+;
+;
+;hddSetVars
+;
+	ld	a,(selHdd)
+	and	#07
+	ret	z
+	push	hl
+	push	de
+	push	bc
+	ld	hl,MasterIDE-(EndCurrentIDE-CurrentIDE)
+	ld	de,CurrentIDE
+	ld	bc,EndCurrentIDE-CurrentIDE
+	jr	loop024
+	jr	hddSetIde
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+hddSetIde	ifused
+;установка керналя заданного контроллера IDE
+;вх:  (ideType) - номер бита соответствет контроллеру
+;
+;hddSetIde
+;
+	push	hl
+	push	de
+	push	bc
+	call	kPortsOff
+	ld	a,(ideType)
+	ld	hl,ideSMUCv1-(endKernal-ideKernal)
+	ld	de,ideKernal
+	ld	bc,endKernal-ideKernal
+loop024	add	hl,bc
+	rrca
+	jr	nc,loop024
+	ldir
+	call	kPortsOn
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+;отключение кеша
+	MACRO	noCache
+	 IFDEF	offCACHE
+	  in	a,(#7B)
+	  ret
+	 ELSE
+	  or	a
+	  ret
+	  nop
+	 ENDIF
+	ENDM
+
+;------------------------------------------------------------------------------
+;пустая функция
+	MACRO	NoFunct
+	 or	a
+	 ret
+	 nop
+	ENDM
+
+;------------------------------------------------------------------------------
+;керналь и порты для работы со контроллером IDE
+;длина 42 байта
+;
+ideKernal
+;
+kHddTestInit	NoFunct		;+#00 0 проверка существования винчестера
+kOut_C_A	NoFunct		;+#03 1 запись в порт
+kIn_A_C		NoFunct		;+#06 2 чтение порта
+kHddWriteData	NoFunct		;+#09 3 запись сектора
+kHddReadData	NoFunct		;+#0C 4 чтение сектора
+kHddReset	NoFunct		;+#0F 5 сброс винчестера
+kPortsOn	NoFunct		;+#12 6 подключение портов (для ATM)
+				;       проверка точек входа в tr-dos для smuc v1
+kPortsOff	NoFunct		;+#15 7 отключение портов (для ATM)
+
+kPortCONF			;+#nn адрес порта конфигурации для SD карты
+kPort1F0	dw	0	;+#nn адрес порта #1F0
+kPortDATA			;+#nn адрес порта данных для SD карты
+kPort1F1	dw	0	;+#nn адрес порта #1F1
+kPortCSlow
+kPort1F2	dw	0	;+#nn адрес порта #1F2
+kPortCSHigh
+kPort1F3	dw	0	;+#nn адрес порта #1F3
+kPort1F4	dw	0	;+#nn адрес порта #1F4
+kPort1F5	dw	0	;+#nn адрес порта #1F5
+kPort1F6	dw	0	;+#nn адрес порта #1F6
+kPort1F7	dw	0	;+#nn адрес порта #1F7
+kPort3F6	dw	0	;+#nn адрес порта #3F6
+endKernal
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы со SMUC v1 (с теневыми портами)
+		IFDEF	SMUCv1
+ideSMUCv1	 jp	hddHddIdent	;0 проверка существования винчестера
+		 jp	out_C_A		;1 запись в порт
+		 jp	in_A_C		;2 чтение порта
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataSv1	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataSv1	;4 чтение сектора
+		 jp	hddResetSmuc	;5 сброс винчестера
+		 IFDEF	noTestTrDos
+		  NoFunct		;6 заглушка
+		 ELSE
+		  jp	smucTest3FF0	;6 проверка точек входа
+		 ENDIF
+		 NoFunct		;7 заглушка
+		 dw	#F8BE		;адрес порта #1F0
+		 dw	#F9BE		;адрес порта #1F1
+		 dw	#FABE		;адрес порта #1F2
+		 dw	#FBBE		;адрес порта #1F3
+		 dw	#FCBE		;адрес порта #1F4
+		 dw	#FDBE		;адрес порта #1F5
+		 dw	#FEBE		;адрес порта #1F6
+		 dw	#FFBE		;адрес порта #1F7
+		 dw	#FEBE		;адрес порта #3F6
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы со SMUC v2
+		IFDEF	SMUCv2
+ideSMUCv2	 jp	hddHddIdent	;0 проверка существования винчестера
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataSv2	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataSv2	;4 чтение сектора
+		 jp	hddResetSmuc	;5 сброс винчестера
+		 NoFunct		;6 заглушка
+		 NoFunct		;7 заглушка
+		 dw	#F8BE		;адрес порта #1F0
+		 dw	#F9BE		;адрес порта #1F1
+		 dw	#FABE		;адрес порта #1F2
+		 dw	#FBBE		;адрес порта #1F3
+		 dw	#FCBE		;адрес порта #1F4
+		 dw	#FDBE		;адрес порта #1F5
+		 dw	#FEBE		;адрес порта #1F6
+		 dw	#FFBE		;адрес порта #1F7
+		 dw	#FEBE		;адрес порта #3F6
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с NEMO
+		IFDEF	NemoStd
+ideNemo		 jp	hddHddIdent	;0 проверка существования винчестера
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataN	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataN	;4 чтение сектора
+		 jp	hddResetNemo	;5 сброс винчестера
+		 NoFunct		;6 заглушка
+		 NoFunct		;7 заглушка
+		 dw	#FF10		;адрес порта #1F0
+		 dw	#FF30		;адрес порта #1F1
+		 dw	#FF50		;адрес порта #1F2
+		 dw	#FF70		;адрес порта #1F3
+		 dw	#FF90		;адрес порта #1F4
+		 dw	#FFB0		;адрес порта #1F5
+		 dw	#FFD0		;адрес порта #1F6
+		 dw	#FFF0		;адрес порта #1F7
+		 dw	#FFC8		;адрес порта #3F6
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с NEMO A8
+		IFDEF	NemoA8
+ideNemoA8	 jp	hddHddIdent	;0 проверка существования винчестера
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataNA8	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataNA8	;4 чтение сектора
+		 jp	hddResetNemo	;5 сброс винчестера
+		 NoFunct		;6 заглушка
+		 NoFunct		;7 заглушка
+		 dw	#FE10		;адрес порта #1F0
+		 dw	#FE30		;адрес порта #1F1
+		 dw	#FE50		;адрес порта #1F2
+		 dw	#FE70		;адрес порта #1F3
+		 dw	#FE90		;адрес порта #1F4
+		 dw	#FEB0		;адрес порта #1F5
+		 dw	#FED0		;адрес порта #1F6
+		 dw	#FEF0		;адрес порта #1F7
+		 dw	#FEC8		;адрес порта #3F6
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с ATM-IDE
+		IFDEF	ATMide
+ideATM		 jp	hddHddIdent	;0 проверка существования винчестера
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataAtm	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataAtm	;4 чтение сектора
+		 NoFunct		;5 заглушка
+		 jp	atmPortsOn	;6 включение портов ATM
+		 jp	atmPortsOff	;7 выключение портов ATM
+		 dw	#FE0F		;адрес порта #1F0
+		 dw	#FE2F		;адрес порта #1F1
+		 dw	#FE4F		;адрес порта #1F2
+		 dw	#FE6F		;адрес порта #1F3
+		 dw	#FE8F		;адрес порта #1F4
+		 dw	#FEAF		;адрес порта #1F5
+		 dw	#FECF		;адрес порта #1F6
+		 dw	#FEEF		;адрес порта #1F7
+		 dw	#FFFF		;адрес порта #3F6 (отсутствует)
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с PROFIide
+		IFDEF	PROFIide
+idePROFI	 jp	hddHddIdent	;0 проверка существования винчестера
+		 out	(c),a		;1 запись в порт
+		 ret
+		 jp	in_A_C_profi	;2 чтение порта
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	hddWriteDataPrf	;3 запись сектора
+		 ENDIF
+		 jp	hddReadDataPrf	;4 чтение сектора
+		 jp	hddResetNemo	;5 сброс винчестера
+		 jp	profiPortsOn	;6 включение портов PROFI
+		 jp	profiPortsOff	;7 выключение портов PROFI
+		 dw	#FFCB		;адрес порта #1F0
+		 dw	#01EB		;адрес порта #1F1
+		 dw	#02EB		;адрес порта #1F2
+		 dw	#03EB		;адрес порта #1F3
+		 dw	#04EB		;адрес порта #1F4
+		 dw	#05EB		;адрес порта #1F5
+		 dw	#06EB		;адрес порта #1F6
+		 dw	#07EB		;адрес порта #1F7
+		 dw	#06AB		;адрес порта #3F6
+/*
+		 dw	#F8EB		;адрес порта #1F0
+		 dw	#F9EB		;адрес порта #1F1
+		 dw	#FAEB		;адрес порта #1F2
+		 dw	#FBEB		;адрес порта #1F3
+		 dw	#FCEB		;адрес порта #1F4
+		 dw	#FDEB		;адрес порта #1F5
+		 dw	#FEEB		;адрес порта #1F6
+		 dw	#FFEB		;адрес порта #1F7
+		 dw	#00AB		;адрес порта #3F6
+*/
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с ATM-IDE
+		IFDEF	ZC
+sdZC		 jp	sdTestInit	;0 инициализация SD карты
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	sdWriteSecs_HL	;3 запись сектора/блока секторов
+		 ENDIF
+		 jp	sdReadSecs_HL	;4 чтение сектора/блока секторов
+		 NoFunct		;5 заглушка
+		 NoFunct		;6 заглушка
+		 NoFunct		;7 заглушка
+		 dw	#0077		;адрес порта конфигурации для SD карты
+		 dw	#0057		;адрес порта данных для SD карты
+		 dw	#01		;не используется
+		 dw	#03		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;керналь для работы с DivMMC
+		IFDEF	DivMMC
+sdDivMMC	 jp	sdTestInit	;0 инициализация SD карты
+		 out	(c),a		;1 запись в порт
+		 ret
+		 in	a,(c)		;2 чтение порта
+		 ret
+		 IFDEF	onlyRead
+		  NoFunct
+		 ELSE
+		  jp	sdWriteSecs_HL	;3 запись сектора/блока секторов
+		 ENDIF
+		 jp	sdReadSecs_HL	;4 чтение сектора/блока секторов
+		 NoFunct		;5 заглушка
+		 NoFunct		;6 заглушка
+		 NoFunct		;7 заглушка
+		 dw	#00E7		;адрес порта конфигурации для SD карты
+		 dw	#00EB		;адрес порта данных для SD карты
+		 dw	#FE		;не используется
+		 dw	#FF		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		 dw	0		;не используется
+		ENDIF
+
+;==============================================================================

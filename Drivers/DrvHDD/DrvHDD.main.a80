@@ -1,0 +1,237 @@
+;Драйвер работы с винчестером
+;HDD Driver v1.00/v1.10
+;(c) 2023-2024 LW aka PLM
+;
+;Date Creating: 24.08.2023
+;Last   Update: 05.09.2024
+;Last  Edition: 07.09.2024
+;
+;Файлы:
+;DrvHDD.main.a80	- этот файл
+;DrvHDD.kernal1_00.a80	- блоки описания контроллеров IDE для v1.00
+;DrvHDD.kernal1_10.a80	- блоки описания контроллеров IDE для v1.10
+;DrvHDD.hdd.a80		- процедуры для работы с накопителем
+;DrvHDD.spi.a80		- процедуры для работы с портами контроллеров SD
+;DrvHDD.ide.a80		- процедуры для работы с портами контроллеров IDE
+;DrvHDD.calc.a80	- процедуры для математических расчетов
+;DrvHDD.var1_00.a80	- переменные для v1.00
+;DrvHDD.var1_10.a80	- переменные для v1.10
+;DrvHDD.lua		- LUA
+;
+;------------------------------------------------------------------------------
+;ключи компиляции
+	DEVICE 	ZXSPECTRUM128
+	INCLUDE "DrvHDD.lua"
+;	PAGE	#XX
+	MODULE	DrvHDD
+
+;------------------------------------------------------------------------------
+;условия трансляции 
+
+	DEFINE	ver1_10		;сборка версии 1.10
+;	DEFINE	ver1_00		;сборка версии 1.00
+	DEFINE	DrvHddExtVars	;переменные хранятся вне драйвера
+	DEFINE	AllDevice	;использовать все контроллеры
+	DEFINE	SMUCv2		;поддержка SMUC v2
+	DEFINE	SMUCv1		;поддержка SMUC v1 (через теневые порты)
+	DEFINE	NemoStd		;поддержка NEMO
+	DEFINE	NemoA8		;поддержка NEMO A8
+	DEFINE	ATMide		;поддержка ATM-IDE
+	DEFINE	PROFIide	;поддержка PROFI-IDE
+	DEFINE	ZC		;поддержка Z-Controller
+	DEFINE	DivMMC		;поддержка DivMMC
+	DEFINE	MultiRW		;чтение групп секторов
+	DEFINE	LBA32		;поддержка LBA32 адресации
+	DEFINE	offCACHE	;отключать кэш
+;	DEFINE	scrATM80x25	;текстовый экран ATM
+	DEFINE	scrATMstd	;стандартный экран ATM
+;	DEFINE	onlyRead	;только чтение
+;	DEFINE	noTestTrDos	;не проверять наличие в Tr-Dos процедур чтения/записи в порты для SMUC
+;	DEFINE	openDOS		;теневые порты открыты
+;	DEFINE	forGMXloader	;для загрузчика GMX
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;коррекция условий трансляции в зависимости от заданных
+	IFDEF	AllDevice
+	 IFNDEF	SMUCv2		;поддержка SMUC v2
+	 DEFINE	SMUCv2		;поддержка SMUC v2
+	 ENDIF
+	 IFNDEF	SMUCv1		;поддержка SMUC v1 (через теневые порты)
+	 DEFINE	SMUCv1		;поддержка SMUC v1 (через теневые порты)
+	 ENDIF
+	 IFNDEF	NemoStd		;поддержка NEMO
+	 DEFINE	NemoStd		;поддержка NEMO
+	 ENDIF
+	 IFNDEF	NemoA8		;поддержка NEMO A8
+	 DEFINE	NemoA8		;поддержка NEMO A8
+	 ENDIF
+	 IFNDEF	ATMide		;поддержка ATM-IDE
+	 DEFINE	ATMide		;поддержка ATM-IDE
+	 ENDIF
+	 IFNDEF	PROFIide	;поддержка PROFI-IDE
+	 DEFINE	PROFIide	;поддержка PROFI-IDE
+	 ENDIF
+	 IFNDEF	ZC		;поддержка Z-Controller
+	 DEFINE	ZC		;поддержка Z-Controller
+	 ENDIF
+	 IFNDEF	DivMMC		;поддержка DivMMC
+	 DEFINE	DivMMC		;поддержка DivMMC
+	 ENDIF
+	ENDIF
+	IFDEF	SMUCv1
+	 IFNDEF	SMUC
+	 DEFINE	SMUC
+	 ENDIF
+	ENDIF
+	IFDEF	SMUCv2
+	 IFNDEF	SMUC
+	 DEFINE	SMUC
+	 ENDIF
+	ENDIF
+	IFDEF	NemoStd
+	 IFNDEF	NEMO
+	 DEFINE	NEMO
+	 ENDIF
+	ENDIF
+	IFDEF	NemoA8
+	 IFNDEF	NEMO
+	 DEFINE	NEMO
+	 ENDIF
+	ENDIF
+	IFDEF	PROFIide
+	 IFDEF	MultiRW
+	 UNDEFINE MultiRW
+	 ENDIF
+	ENDIF
+	IFDEF	ZC
+	 IFNDEF	LBA32
+	 DEFINE	LBA32		;поддержка LBA32 адреации
+	 ENDIF
+	 IFNDEF	SDcard
+	 DEFINE	SDcard
+	 ENDIF
+	ENDIF
+	IFDEF	DivMMC
+	 IFNDEF	LBA32
+	 DEFINE	LBA32		;поддержка LBA32 адреации
+	 ENDIF
+	 IFNDEF	SDcard
+	 DEFINE	SDcard
+	 ENDIF
+	ENDIF
+	
+;------------------------------------------------------------------------------
+;константы драйвера
+
+;состояние порта #DFFD для включения/выключения портов PROFI IDE
+baseDFFDon	equ	%00100000	;для включения
+baseDFFDoff	equ	%00000000	;для выключения
+
+		IFDEF	scrATM80x25
+atmXX77		 equ	%00000110	;для текстового экрана 80x25
+		ENDIF
+		IFDEF	scrATMstd
+atmXX77		 equ	%00000011	;для стандартного экрана
+		ENDIF
+
+;------------------------------------------------------------------------------
+;внешние переменные
+
+;флаги внешней программы
+;5,=1 игнорировать защиту от записи на SD
+;
+ExtFlags	equ _ExtFlags ;#XXXX
+
+;тайм ауты
+busyTimeOut	equ #20;#4FD3
+cmdTimeOut	equ #10;#14E6
+dataTimeOut	equ #80;#C350
+
+;если задано условие DrvHddExtVars
+;	IFDEF	DrvHddExtVars
+;msSMUC	 equ	0	;SMUC master
+;slSMUC	 equ	0	;SMUC slave
+;msNemo	 equ	0	;Nemo master
+;slNemo	 equ	0	;Nemo slave
+;msATM	 equ	0	;ATM IDE master
+;slATM	 equ	0	;ATM IDE slave
+;msPROFI	 equ	0	;PROFI IDE master
+;slPROFI	 equ	0	;PROFI IDE slave
+;cardZC	 equ	0	;ZC SD карта
+;mDivMMC	 equ	0	;DivMMC master
+;sDivMMC	 equ	0	;DivMMC slave
+;	ENDIF
+
+;если задано условие DrvHddExtVars
+  IFDEF  DrvHddExtVars
+msSMUC  equ  _msSMUC  ;SMUC master
+slSMUC  equ  _slSMUC  ;SMUC slave
+msNemo  equ  _msNemo  ;Nemo master
+slNemo  equ  _slNemo  ;Nemo slave
+msATM  equ  _msATM  ;ATM IDE master
+slATM  equ  _slATM  ;ATM IDE slave
+msPROFI  equ  _msPROFI;PROFI IDE master
+slPROFI  equ  _msPROFI;PROFI IDE slave
+cardZC  equ  _cardZC  ;ZC SD карта
+mDivMMC  equ  _mDivMMC;DivMMC master
+sDivMMC  equ  _sDivMMC;DivMMC slave
+  ENDIF
+
+;------------------------------------------------------------------------------
+;Константы драйвера
+
+;Адрес ассемблирования:
+AdrDrvBegin	equ $
+
+;различные буфера
+BufSecHdd	equ _BufSecHdd ;#XXXX	;буфер для загрузки/записи сектора 
+Buf4MBR		equ BufSecHdd	;буфер для загрузки сектора MBR
+
+;адреса процедур в Tr-Dos для SMUC
+dosOutPort equ	#3FF0		;адрес процедуры записи в порт для SMUC v1
+dosInPort  equ	#3FF3		;адрес процедуры чтения порта для SMUC v1
+
+;Коды ошибок
+errOK		equ #00
+errNumTooBig	equ #11 ;number too big
+errInvFileName	equ #45 ;invalid file name
+errFileNotFound	equ #48 ;file not found
+errDiskNoSpace	equ #49	;disk no space
+errRWnum	equ #50 ;R/W error _число_
+errHddNotFound	equ #56 ;hard disk not found
+errHddRWerror	equ #57 ;hard disk R/W error #nnnn
+errHddBusy	equ #60 ;busy not found
+errHddNotReady	equ #61 ;hard disk not ready
+errHddNotData	equ #62 ;hard disk data not ready
+errInvPartMg	equ #63 ;invalid partition manager
+errPartNotFound	equ #66 ;partition not found
+errInvalidPart	equ #6D ;invalid partition
+errNoMBR	equ #6E ;MBR not found
+errInvalidFile	equ #70 ;invalid file
+errEoF		equ #71 ;end of file
+errPathEmpty	equ #72 ;path empty
+errFileExist	equ #73 ;file exist
+errDirNotEmpty	equ #74 ;dir not empty
+errFileEmpty	equ #75 ;file empty
+
+;------------------------------------------------------------------------------
+
+	ORG		AdrDrvBegin
+Start
+	IFDEF		ver1_10
+	 INCLUDE	"DrvHDD.kernal1_10.a80"
+	ELSE
+	 INCLUDE	"DrvHDD.kernal1_00.a80"
+	ENDIF
+	INCLUDE		"DrvHDD.hdd.a80"
+	INCLUDE		"DrvHDD.spi.a80"
+	INCLUDE		"DrvHDD.ide.a80"
+	INCLUDE		"DrvHDD.calc.a80"
+	IFDEF		ver1_10
+	 INCLUDE	"DrvHDD.var1_10.a80"
+	ELSE
+	 INCLUDE	"DrvHDD.var1_00.a80"
+	ENDIF
+End	;SAVEBIN	"drvhdd.bin",Start,End-Start
+	DISPLAY		"Lenght DrvHDD = ",/A,End-Start
+	ENDMODULE

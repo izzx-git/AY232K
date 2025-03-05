@@ -1,0 +1,986 @@
+;Процедуры  HDD Driver. процедуры для работы с портами контроллеров IDE
+;файл DrvHDD.ide.a80
+;
+;hddTestInit		проверка существования винчестера
+;hddReadIdSec		чтение сектора идентификации в буфер по адресу в ix
+;hddCheckError		проверка на ошибки и выход, в случае ошибки сброс винчестера
+;hddResetSmuc		програмный сброс винчестера SMUC
+;hddResetNemo		програмный сброс винчестера NEMO
+;hddReadDataSv1		чтение 512b данных в буфер адресуемый hl (для SMUC v1 shadow)
+;hddReadDataSv2		чтение 512b данных в буфер адресуемый hl (для SMUC v2)
+;hddReadDataN		чтение 512b данных в буфер адресуемый hl (для NEMO)
+;hddReadDataNA8		чтение 512b данных в буфер адресуемый hl (для NEMO A8)
+;hddReadDataAtm		чтение 512b данных в буфер адресуемый hl (для ATM-IDE)
+;hddReadDataPrf		чтение 512b данных в буфер адресуемый hl (для PROFI IDE)
+;hddWriteDataSv1	запись 512b данных из буфера адресуемого hl (для SMUC v1 shadow)
+;hddWriteDataSv2	запись 512b данных из буфера адресуемого hl (для SMUC v2)
+;hddWriteDataN		запись 512b данных из буфера адресуемого hl (для NEMO)
+;hddWriteDataNA8	запись 512b данных из буфера адресуемого hl (для NEMO A8)
+;hddWriteDataAtm	запись 512b данных из буфера адресуемого hl (для ATM-IDE)
+;hddWriteDataPrf	запись 512b данных из буфера адресуемого hl (для PROFI-IDE)
+;hddSendCmd		посылаем команду винчестеру
+;hddWaitReadyData	ожидание готовности HDD к передаче данных
+;hddWaitReadyCmd	ожидание готовности HDD к принятию команды
+;hddWaitNoBusy		ожидание готовности HDD
+;smucTest3FF0		проверка наличия команд для работы Smuc v1
+;profiPortsOff		выключение портов PROFI
+;profiPortsOn		включение портов PROFI
+;atmPortsOff		выключение портов ATM
+;atmPortsOn		включение портов ATM
+;out_C_A_2A53		запись в теневой порт
+;out_C_A		запись в теневой порт
+;in_A_C_profi		чтение порта PROFI
+;in_A_C			чтение теневого порта
+;
+;------------------------------------------------------------------------------
+hddTestInit	ifused
+;проверка существования винчестера
+;вх:  ix - адрес буфера для чтения идентификационного сектора
+;     a=#A0/#B0 проверяем Master/Slave
+;вых: cy=1 ошибки чтения/записи либо винчестер не найден
+;       a=#56 hard disk not found
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;     cy=0 винчестер обнаружен, в ix прочитан сектор идентификации
+;       a=#00
+;       hl,de,bc - ????
+;
+;hddTestInit
+;
+;установка винчестера master/slave и LBA addr =#00000000
+	ld	d,a
+	ld	e,#06
+	xor	a
+	ld	hl,kPort1F1
+loop016	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)
+	inc	hl
+	dec	e
+	call	nz,kOut_C_A
+	jr	nz,loop016
+	ld	a,d
+	call	kOut_C_A
+;d=#A0/#B0 проверяем Master/Slave
+
+;отправляем команду #90 (EXECUTE DEVICE DIAGNOSTIC)
+	call	hddWaitReadyCmd		;->bc - порт #1F7 - Command/Status
+	ret	c			;error -> a=#60/#61
+	ld	a,#90			;EXECUTE DEVICE DIAGNOSTIC
+	call	kOut_C_A
+	call	hddWaitNoBusy
+	ret	c			;error -> a=#60
+;  проверяем ответ
+	ld	bc,(kPort1F1)		;Error
+	call	kIn_A_C
+	bit	4,d
+	jr	z,goto019		;идентификация master`а
+	cp	#80
+	jr	z,goto020		;slave может быть есть
+goto019	cp	#01
+	jr	nz,goto021		;master/slave отсутствует
+
+;винчестер возможно присутствует
+;  проверяем сигнатуру
+goto020	ld	bc,(kPort1F5)		;Cylinder high
+	call	kIn_A_C
+	ld	e,a
+	ld	bc,(kPort1F4)		;Cylinder low
+	call	kIn_A_C
+	or	e
+	jr	nz,goto021		;это не винчестер, дальше можно проверить сигнатуру CD
+	ld	bc,(kPort1F3)		;Sector number
+	call	kIn_A_C
+	ld	e,a
+	dec	e
+	ld	bc,(kPort1F2)		;Sector count
+	call	kIn_A_C
+	dec	a
+	or	e
+	jr	nz,goto021		;это не винчестер, дальше можно проверить сигнатуру CD
+	call	hddReadIdSec		;читаем сектор идентификации
+	ret	c			;a=#57/#60/#61/#62
+;  проверяем на мусор вернулись ли одинаковые слова
+	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)			;bc - первое слово
+	inc	hl
+	ld	a,#FF
+loop017	ld	e,(hl)			;сравниваем с остальными
+	inc	hl
+	ld	d,(hl)
+	inc	hl
+	ex	de,hl
+	or	a
+	sbc	hl,bc
+	ex	de,hl
+	jr	nz,goto022		;не одинаковые слова
+	dec	a
+	jr	nz,loop017
+
+;винчестер не найден
+goto021	ld	a,#56
+	scf
+	ret
+
+;все проверки пройдены, это винчестер
+goto022	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadIdSec	ifused
+;чтение сектора идентификации в буфер по адресу в ix
+;вх:  ix - адрес буфера для чтения сектора идентификации
+;     d=#E0/#F0 - master/slave
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;     cy=0 сектор считан
+;       hl - адрес с сектором
+;       bc=порт #1F7
+;
+;hddReadIdSec
+;
+	ld	bc,(kPort1F6)
+	ld	a,d
+	call	kOut_C_A
+	call	hddWaitReadyCmd		;->bc - порт #1F7 - Command/Status
+	ret	c			;error -> a=#60/#61
+	ld	a,#EC			;IDENTIFY DEVICE
+	call	kOut_C_A
+	call	hddWaitReadyData
+	jp	c,kHddReset		;error -> a=#60/#62
+	push	ix
+	pop	hl			;адрес буфера для чтения сектора
+	call	kHddReadData
+	jp	hddCheckError		;error -> a=#57
+	org	$-3
+
+	endif
+
+;------------------------------------------------------------------------------
+hddCheckError	ifused
+;проверка на ошибки и выход, в случае ошибки сброс винчестера
+;вых: cy=0 ошибок не было
+;       =1 были ошибки -> a=#57, (ideError) - код ошибки винчестера
+;
+;hddCheckError
+;
+	ld	bc,(kPort1F7)
+	call	kIn_A_C
+	ld	d,a			;регистр состояния
+	and	%01110001
+	xor	%01010000
+	ret	z			;выход при готовности винчестера и отсутствии ошибок
+	ld	bc,(kPort1F1)
+	call	kIn_A_C			;читаем код ошибки
+	ld	(ideError),a		;сохраняем
+	ld	a,#57			;код ошибки драйвера
+	scf
+	jp	kHddReset		;програмный сброс винчестера
+
+	endif
+
+;------------------------------------------------------------------------------
+hddResetSmuc	ifused
+;програмный сброс винчестера SMUC
+;
+;hddResetSmuc
+;
+	push	af
+	push	bc
+
+	ld	bc,#FFBA
+	ld	a,#F7
+	call	out_C_A_2A53		;device control/alt status on
+	push	bc
+	ld	bc,#FEBE
+	ld	a,%00001100
+	call	kOut_C_A		;програмный сброс винчестера
+	add	a,a			;пауза 383t
+loop015	dec	a			;
+	jr	nz,loop015		;
+	call	kOut_C_A		;завершаем програмный сброс винчестера
+	pop	bc
+	ld	a,#77
+	call	out_C_A_2A53		;device control/alt status off
+
+	pop	bc
+	pop	af
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddResetNemo	ifused
+;програмный сброс винчестера NEMO
+;
+;hddResetNemo
+;
+	push	af
+	push	bc
+
+;установим номер винчестера
+;	ld	bc,(kPort1F6)
+;	ld	a,(idePort1F6)
+;	out	(c),a			;запись в порт
+
+;сброс винчестера
+	ld	bc,(kPort3F6)
+	ld	a,%00000100
+	out	(c),a			;програмный сброс винчестера
+	IFDEF	PROFIide
+	 call	Pause70k
+	ELSE
+	 xor	a			;пауза 4095t
+loop014	 dec	a			;
+	 jr	nz,loop014		;
+	ENDIF
+	out	(c),a			;завершаем програмный сброс винчестера
+	IFDEF	PROFIide
+	 call	Pause70k
+	ELSE
+loop049	 dec	a			;
+	 jr	nz,loop049		;
+	ENDIF
+
+	pop	bc
+	pop	af
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataSv1	ifused
+;чтение 512b данных в буфер адресуемый hl (для SMUC v1 shadow)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddReadDataSv1
+;
+	di
+	push	ix
+	push	hl
+	ld	(cng_02+1),sp
+	ex	de,hl
+	ld	c,#BE
+	ld	hl,#3D2F
+	ld	xl,#40
+loop013	ld	sp,var_02
+	ld	b,#F8
+	jp	(hl)
+goto011	ld	(de),a
+	inc	de
+	ld	b,#D8
+	jp	(hl)
+goto012	ld	(de),a
+	inc	de
+	ld	b,#F8
+	jp	(hl)
+goto013	ld	(de),a
+	inc	de
+	ld	b,#D8
+	jp	(hl)
+goto014	ld	(de),a
+	inc	de
+	ld	b,#F8
+	jp	(hl)
+goto015	ld	(de),a
+	inc	de
+	ld	b,#D8
+	jp	(hl)
+goto016	ld	(de),a
+	inc	de
+	ld	b,#F8
+	jp	(hl)
+goto017	ld	(de),a
+	inc	de
+	ld	b,#D8
+	jp	(hl)
+goto018	ld	(de),a
+	inc	de
+	dec	xl
+	jp	nz,loop013
+cng_02	ld	sp,#0000
+	pop	hl
+	pop	ix
+	ei
+	xor	a
+	ret
+var_02	dw	dosInPort,goto011
+	dw	dosInPort,goto012
+	dw	dosInPort,goto013
+	dw	dosInPort,goto014
+	dw	dosInPort,goto015
+	dw	dosInPort,goto016
+	dw	dosInPort,goto017
+	dw	dosInPort,goto018
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataSv2	ifused
+;чтение 512b данных в буфер адресуемый hl (для SMUC v2)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddReadDataSv2
+;
+	push	hl
+	ld	c,#BE
+	ld	de,#D8F8
+	xor	a
+loop012	ld	b,e		;порт #F8BE регистр данных (младшая часть)
+	ini
+	ld	b,d		;порт #D8BE регистр данных (старшая часть)
+	ini
+	dec	a
+	jp	nz,loop012
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataN	ifused
+;чтение 512b данных в буфер адресуемый hl (для NEMO)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     bc - ???
+;
+;hddReadDataN
+;
+	push	hl
+	ld	bc,#FF10	;порт #FF10 регистр данных (младшая часть)
+	xor	a
+loop011	ini
+	inc	b
+	inc	c		;порт #FF11 регистр данных (старшая часть)
+	ini
+	inc	b
+	dec	c
+	dec	a
+	jp	nz,loop011
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataNA8	ifused
+;чтение 512b данных в буфер адресуемый hl (для NEMO A8)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddReadDataNA8
+;
+	ld	bc,#0010
+	jr	goto010
+	jr	hddReadDataAtm
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataAtm	ifused
+;чтение 512b данных в буфер адресуемый hl (для ATM-IDE)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddReadDataAtm
+;
+	ld	bc,#000F
+goto010	push	hl
+	inir
+	inir
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadDataPrf	ifused
+;чтение 512b данных в буфер адресуемый hl (для PROFI IDE)
+;вх:  hl - адрес буфера для чтения данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddReadDataPrf
+;
+	push	hl
+	ld	de,#EBCB
+	xor	a
+	ld	b,a
+loop048	ld	c,e			;порт #00CB регистр данных (младшая часть)
+	ini
+	inc	b
+	ld	c,d			;порт #00EB регистр данных (старшая часть)
+	ini
+	inc	b
+	dec	a
+	jp	nz,loop048
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataSv1	ifused
+;запись 512b данных из буфера адресуемого hl (для SMUC v1 shadow)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataSv1
+;
+	di
+	push	ix
+	push	hl
+	ld	(cng_01+1),sp
+	ld	c,#BE
+	ld	ix,#3D2F
+	ld	d,#40
+loop006	ld	sp,var_01
+	ld	e,(hl)
+	inc	hl
+	ld	a,(hl)
+	inc	hl
+	ld	b,#D8
+	jp	(ix)
+goto001	ld	b,#F8
+	ld	a,e
+	jp	(ix)
+goto002	ld	e,(hl)
+	inc	hl
+	ld	a,(hl)
+	inc	hl
+	ld	b,#D8
+	jp	(ix)
+goto003	ld	b,#F8
+	ld	a,e
+	jp	(ix)
+goto004	ld	e,(hl)
+	inc	hl
+	ld	a,(hl)
+	inc	hl
+	ld	b,#D8
+	jp	(ix)
+goto005	ld	b,#F8
+	ld	a,e
+	jp	(ix)
+goto006	ld	e,(hl)
+	inc	hl
+	ld	a,(hl)
+	inc	hl
+	ld	b,#D8
+	jp	(ix)
+goto007	ld	b,#F8
+	ld	a,e
+	jp	(ix)
+goto008	dec	d
+	jp	nz,loop006
+cng_01	ld	sp,#0000
+	pop	hl
+	pop	ix
+	ei
+	xor	a
+	ret
+var_01	dw	dosOutPort,goto001
+	dw	dosOutPort,goto002
+	dw	dosOutPort,goto003
+	dw	dosOutPort,goto004
+	dw	dosOutPort,goto005
+	dw	dosOutPort,goto006
+	dw	dosOutPort,goto007
+	dw	dosOutPort,goto008
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataSv2	ifused
+;запись 512b данных из буфера адресуемого hl (для SMUC v2)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataSv2
+;
+	push	hl
+	ld	c,#BE
+	ld	de,#D9F9	;команда outd вначале делает dec b
+	xor	a
+loop010	ld	b,d		;порт #D8BE регистр данных (старшая часть)
+	inc	hl
+	outd
+	ld	b,e		;порт #F8BE регистр данных (младшая часть)
+	outi
+	inc	hl
+	dec	a
+	jp	nz,loop010
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataN	ifused
+;запись 512b данных из буфера адресуемого hl (для NEMO)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataN
+;
+	push	hl
+	ld	bc,#0011		;команда outd вначале делает dec b
+	xor	a
+loop009	inc	hl
+	outd				;старший байт
+	dec	c
+	inc	b
+	outi				;младший байт
+	inc	c
+	inc	b
+	inc	hl
+	dec	a
+	jp	nz,loop009
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataNA8	ifused
+;запись 512b данных из буфера адресуемого hl (для NEMO A8)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataNA8
+;
+	ld	c,#10
+	jr	goto009
+	jr	hddWriteDataAtm
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataAtm	ifused
+;запись 512b данных из буфера адресуемого hl (для ATM-IDE)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataAtm
+;
+	ld	c,#0F
+goto009	push	hl
+	xor	a
+	ld	e,a			;команда outd вначале делает dec b
+loop007	ld	b,e
+	inc	hl
+	outd				;старший байт
+	outi				;младший байт
+	inc	hl
+	dec	a
+	jp	nz,loop007
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWriteDataPrf	ifused
+;запись 512b данных из буфера адресуемого hl (для PROFI-IDE)
+;вх:  hl - адрес буфера для записи данных
+;вых: cy=0
+;     hl - не меняется
+;     a=#00
+;     de,bc - ???
+;
+;hddWriteDataPrf
+;
+	push	hl
+	ld	de,#EBCB
+	xor	a
+	ld	b,a
+loop047	inc	b			;команда outd вначале делает dec b
+	ld	c,e			;порт #00CB регистр данных (младшая часть)
+	inc	hl
+	outd
+	inc	b
+	ld	c,d			;порт #00EB регистр данных (старшая часть)
+	outi
+	inc	hl
+	dec	a
+	jp	nz,loop047
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddSendCmd	ifused
+;посылаем команду винчестеру
+;вх:  a - команда винчестеру
+;вых: cy=1 HDD не вышел в готовность
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;     cy=0 команда загружена в регистр
+;        a,d - команда винчестеру
+;     bc - порт #1F7
+;     hl,e - ???
+;
+;hddSendCmd
+;
+;ожидание готовности hdd
+	ld	d,a
+	call	hddWaitNoBusy		;ожидание готовности HDD
+	ret	c			;ошибка: hdd не вышел в готовность
+
+;загрузка в регистры кол-ва секторов, адреса LBA/CHS, типа устройства
+	push	de
+	ld	de,idePort1F1
+	ld	hl,kPort1F1
+	ld	a,#06
+loop005	push	af
+	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)
+	inc	hl
+	ld	a,(de)
+	inc	de
+	call	kOut_C_A
+	pop	af
+	dec	a
+	jr	nz,loop005
+	pop	de
+
+;ожидание готовности к приему команды
+	call	hddWaitReadyCmd		;ожидание готовности HDD к принятию команды
+	ret	c			;ошибка: hdd не вышел в готовность
+	ld	a,d
+	jp	kOut_C_A
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWaitReadyData	ifused
+;ожидание готовности HDD к передаче данных
+;вх:  ---
+;вых: cy=1 HDD не вышел в готовность
+;       a=#60 busy not found
+;       a=#62 hard disk data not ready
+;     cy=0 HDD готов к принятию команды
+;        a - регистр состояния
+;     bc - порт #1F7
+;     hl,e - ???
+;
+;hddWaitReadyData
+;
+	call	hddWaitNoBusy		;ожидание готовности HDD
+	ret	c			;ошибка: hdd не вышел в готовность
+	bit	3,a
+	ret	nz			;винчестер готов к передаче данных
+;bc - порт #1F7
+
+;ждем готовности к передаче данных
+	ld	hl,dataTimeOut
+loop004	call	kIn_A_C			;читаем регистр состояния
+	bit	3,a
+	ret	nz			;винчестер готов к передаче данных
+	dec	hl
+	ld	a,h
+	or	l
+	jr	nz,loop004
+	ld	a,#62
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWaitReadyCmd	ifused
+;ожидание готовности HDD к принятию команды
+;вх:  ---
+;вых: cy=1 HDD не вышел в готовность
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;     cy=0 HDD готов к принятию команды
+;        a - регистр состояния
+;     bc - порт #1F7
+;     hl,e - ???
+;
+;hddWaitReadyCmd
+;
+	call	hddWaitNoBusy		;ожидание готовности HDD
+	ret	c			;ошибка: hdd не вышел в готовность
+	bit	6,a
+	ret	nz			;выход. винчестер готов принять команду
+;bc - порт #1F7
+
+;ждем готовности принять команду
+	ld	hl,cmdTimeOut
+loop003	call	kIn_A_C			;читаем регистр состояния
+	bit	6,a
+	ret	nz			;выход. винчестер готов принять команду
+	dec	e
+	jr	nz,loop003
+	dec	hl
+	ld	a,h
+	or	l
+	jr	nz,loop003
+	ld	a,#61
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddWaitNoBusy	ifused
+;ожидание готовности HDD
+;вх:  ---
+;вых: cy=1 HDD не вышел в готовность
+;       a=#60 busy not found
+;     cy=0 HDD готов
+;        a - регистр состояния
+;     bc - порт #1F7
+;     hl,e - ???
+;
+;hddWaitNoBusy
+;
+;установим номер винчестера
+	ld	bc,(kPort1F6)
+	ld	a,(idePort1F6)
+	call	kOut_C_A		;запись в порт
+;	IFDEF	PROFIide
+;	 ld	a,(DrvHDD.ideType)
+;	 and	#20
+;	 call	nz,Pause70k
+;	ENDIF
+
+;ожидание готовности
+	ld	bc,(kPort1F7)
+	ld	hl,busyTimeOut		;количество попыток
+loop002	xor	a
+	ld	e,a
+loop001	call	kIn_A_C			;читаем регистр состояния
+	bit	7,a
+	ret	z			;HDD готов
+	dec	e			;HDD занят
+	jr	nz,loop001		;повторяем попытки
+	dec	hl
+	ld	a,h
+	or	l
+	jr	nz,loop002
+	ld	a,#60			;HDD не вышел в готовность
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+smucTest3FF0	ifused
+;проверка наличия команд для работы Smuc v1
+;вых: cy=1 точки входа отсутствуют
+;
+;smucTest3FF0
+;
+;копируем память tr-dos
+	push	iy
+	ld	hl,dosOutPort
+	ld	c,#13
+	di
+	ld	iy,#5C3A
+	im	0
+	call	#3D13
+	im	1 ;2
+	ei
+	pop	iy
+
+;проверяем
+	ld	b,#06
+	ld	hl,#5CDD
+	ld	de,var_03
+loop025	ld	a,(de)
+	cp	(hl)
+	scf
+	ret	nz
+	inc	hl
+	inc	de
+	djnz	loop025
+	or	a
+	ret
+var_03	db	#ED,#79			;out (c),a
+	db	#C9			;ret
+	db	#ED,#78			;in a,(c)
+	db	#C9			;ret
+
+	endif
+
+;------------------------------------------------------------------------------
+profiPortsOff	ifused
+;выключение портов PROFI
+;вх:  ---
+;
+;profiPortsOff
+;
+	ld	a,baseDFFDoff
+	jr	goto068
+	jr	profiPortsOn
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+profiPortsOn	ifused
+;включение портов PROFI
+;вх:  ---
+;
+;profiPortsOn
+;
+	ld	a,baseDFFDon
+goto068	ld	bc,#DFFD
+	out	(c),a
+	or	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+atmPortsOff	ifused
+;выключение портов ATM
+;вх:  ---
+;
+;atmPortsOff
+;
+	ld	bc,#FF77
+;	ld	a,%10101000 or atmXX77
+	jr	goto027
+
+	endif
+
+;------------------------------------------------------------------------------
+atmPortsOn	ifused
+;включение портов ATM
+;вх:  ---
+;
+;atmPortsOn
+;
+	ld	bc,#FD77
+goto027	ld	a,%10101000 or atmXX77
+	or	a
+	jr	out_C_A_2A53
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+out_C_A_2A53	ifused
+;запись в теневой порт
+;вх:  bc - порт
+;     a - слдержимое порта
+;
+;out_C_A_2A53
+;
+	IFDEF	openDOS		;теневые порты открыты
+	 out	(c),a
+	 ret
+	ELSE
+	 push	hl
+	 ld	hl,#2A53
+	 ex	(sp),hl
+	 jp	#3D2F
+	ENDIF
+
+	endif
+
+;------------------------------------------------------------------------------
+out_C_A		ifused
+;запись в теневой порт
+;вх:  bc - порт
+;     a - слдержимое порта
+;
+;out_C_A
+;
+	push	hl
+	ld	hl,dosOutPort
+	ex	(sp),hl
+	jp	#3D2F
+
+	endif
+
+;------------------------------------------------------------------------------
+in_A_C_profi	ifused
+;чтение порта PROFI
+;вх:  bc - порт
+;вых: a - слдержимое порта
+;
+;in_A_C_profi
+;
+	res	5,c
+	in	a,(c)
+	set	5,c
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+in_A_C		ifused
+;чтение теневого порта
+;вх:  bc - порт
+;вых: a - слдержимое порта
+;
+;in_A_C
+;
+	push	hl
+	ld	hl,dosInPort
+	ex	(sp),hl
+	jp	#3D2F
+
+	endif
+
+;==============================================================================
+;ПЕРЕМЕННЫЕ
+;==============================================================================

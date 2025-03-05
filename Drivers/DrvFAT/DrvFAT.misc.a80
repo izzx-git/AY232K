@@ -1,0 +1,500 @@
+;Процедуры  FAT Driver. Процедуры общего назначения
+;файл DrvFAT.misc.a80
+;
+;excngCLSCurrDir	обмен местами адреса начала текущего каталога
+;sizeBytes2Cls		вычисление размера в кластерах
+;altDEHLdivBC		деление de'hl'=de'hl'/bc
+;cmp_adrDE_adrHL	сравнение 4х-байтных числа/строки по адресам в de и hl
+;cmp_adrDE_adrHL_3b	сравнение 3х-байтных числа/строки по адресам в de и hl
+;SetZeroDEHL		обнуление dehl
+;SetZero2tmpDWORD	установка ноля в переменную tmpDWORD
+;cmp_DEHL_adrBC		сравнение числа dehl и числа по адресу в bc
+;StoreCLSCurrDir	сохранение/восстановление адреса начала текущего
+;			каталога во временной переменной
+;CopyDWORD_HL_DE	копирование двойного слова из адреса в hl по адресу в de
+;Inc_addrHL		инкремент переменной DWORD под адресу в hl
+;Inc_DEHL		инкремент dehl=dehl+1
+;Dec_DEHL		декремент dehl=dehl-1
+;LD_DEHL_adrHL		загрузка числа в регистры из памяти
+;Add_DEHL_adrBC		сложение 4х-байтного числа по адресу bc и dehl
+;SRL_dehl_A		деление dehl=dehl/a (a - степень двойки)
+;
+;------------------------------------------------------------------------------
+excngCLSCurrDir	ifused
+;обмен местами адреса начала текущего каталога
+;вх:  hl - адрес переменной с первым кластером каталога
+;
+;excngCLSCurrDir
+;
+	ld	de,CLS_CurrDir
+	ld	b,#04
+loop042	ld	c,(hl)
+	ld	a,(de)
+	ld	(hl),a
+	ld	a,c
+	ld	(de),a
+	inc	de
+	inc	hl
+	djnz	loop042
+
+	ret	
+
+	endif
+
+;------------------------------------------------------------------------------
+sizeBytes2Cls	ifused
+;вычисление размера в кластерах
+;вх:  dehl - размер в байтах
+;вых: cy=1, nz -> a=errNumTooBig - слишком большой размер, более #FFFF кластеров
+;                 ehl - размер в кластерах
+;                 bc - количество байт в последнем кластере
+;     cy=1, z ->  a=errFileEmpty - нулевой размер файла
+;     cy=0 расчитали успешно
+;        hl - размер в кластерах
+;        bc - количество байт в последнем кластере
+;        a,de=#0000
+;
+;sizeBytes2Cls
+;
+;проверим длину на ноль
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	ld	a,errFileEmpty
+	scf
+	ret	z		;нулевая длина
+
+;вычисление размера в кластерах
+	ld	a,(LenCLSInSec)
+	ld	c,#FF
+loop039	srl	d
+	rr	e
+	rr	h
+	rr	l
+	rr	c
+	rra
+	jr	nc,loop039
+	ld	b,l
+	jr	goto089
+loop040	srl	b
+	rr	c
+goto089	rrca
+	jr	nc,loop040
+;bc размер остатка файла в кластере
+;deh количество кластеров
+
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	a,b
+	or	c
+	call	nz,Inc_DEHL
+	ld	a,e
+	or	d
+	ret	z
+
+;ошибка преобразования
+	ld	a,errNumTooBig	;number too big
+	or	a
+	scf
+	ret
+
+	endif
+
+/* старая версия в новой версии выход другой
+sizeBytes2Cls	ifused
+;вычисление размера в кластерах
+;вх:  dehl - размер в байтах
+;вых: cy=1 ошибки
+;        a=errNumTooBig - слишком большой размер
+;        a=errFileEmpty - нулевой размер файла
+;     cy=0 расчитали успешно
+;        bc,hl - размер в кластерах
+;        a,de=#0000
+;
+;sizeBytes2Cls
+;
+;вычисление размера в кластерах
+	ld	a,l
+	or	h
+	or	e
+	or	d
+	ld	a,errFileEmpty
+	scf
+	ret	z
+	ld	a,l
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	d,#00
+	push	af
+	exx
+	ld	a,(LenCLSInSec)
+	add	a,a
+	ld	c,a
+	ld	a,#00
+	adc	a,#00
+	ld	b,a
+	call	altDEHLdivBC
+	pop	af
+	or	l
+	or	h
+	exx
+	call	nz,Inc_DEHL	;есть остаток от деления. прибавим один кластер
+	ld	c,l
+	ld	b,h		;размер в кластерах
+	ld	a,d
+	or	e
+	ret	z
+;ошибка преобразования
+	ld	a,errNumTooBig	;number too big
+	scf
+	ret
+
+	endif
+*/
+
+;------------------------------------------------------------------------------
+altDEHLdivBC	ifused
+;деление de'hl'=de'hl'/bc
+;вх:  de'hl' - делимое
+;     bc - делитель
+;вых: de'hl' - значение
+;     hl остаток от деления
+;
+;altDEHLdivBC
+;
+	ld	hl,#0000
+	push	hl
+	ld	e,l
+	ld	d,h
+	exx
+	ld	b,#20
+loop015	xor	a
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	exx
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	rla
+	or	a
+	sbc	hl,bc
+	ex	(sp),hl
+	ex	de,hl
+	sbc	hl,de
+	ex	de,hl
+	ex	(sp),hl
+	exx	
+	sbc	a,#00
+	jr	nz,goto041
+loop016	inc	l
+	djnz	loop015
+	inc	sp
+	inc	sp
+	exx
+	ret
+loop014	xor	a
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	exx
+	rl	l
+	rl	h
+	rl	e
+	rl	d
+	rla
+	add	hl,bc
+	ex	(sp),hl
+	ex	de,hl
+	adc	hl,de
+	ex	de,hl
+	ex	(sp),hl
+	exx	
+	sbc	a,#00
+	jr	z,loop016
+goto041	djnz	loop014
+	exx
+	add	hl,bc
+	jr	nc,goto042
+	inc	de
+goto042	inc	sp
+	inc	sp
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+cmp_adrDE_adrHL	ifused
+;сравнение двух 4х-байтных числа/строки по адресам в de и hl
+;вых:  z - равны
+;     nz - не равны
+;cmp_adrDE_adrHL
+;
+	ld	a,(de)
+	cp	(hl)
+	ret	nz
+	inc	hl
+	inc	de
+	jr	cmp_adrDE_adrHL_3b
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+cmp_adrDE_adrHL_3b	ifused
+;сравнение двух 3х-байтных числа/строки по адресам в de и hl
+;вых:  z - равны
+;     nz - не равны
+;cmp_adrDE_adrHL_3b
+;
+	ld	a,(de)
+	cp	(hl)
+	ret	nz
+	inc	hl
+	inc	de
+	ld	a,(de)
+	cp	(hl)
+	ret	nz
+	inc	hl
+	inc	de
+	ld	a,(de)
+	cp	(hl)
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SetZeroDEHL	ifused
+;обнуление dehl
+;вых: dehl=#00000000
+;
+;SetZeroDEHL
+;
+	ld	hl,#0000
+	ld	e,l
+	ld	d,l
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+SetZero2tmpDWORD	ifused
+;установка ноля в переменную tmpDWORD
+;
+;SetZero2tmpDWORD
+;
+	ld	bc,#0000
+	ld	(tmpDWORD),bc
+	ld	(tmpDWORD+2),bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+cmp_DEHL_adrBC	ifused
+;сравнение числа dehl и числа по адресу в bc
+;вх:  dehl - 4х байтное число
+;     bc - адрес 4х байтного числа
+;вых: nz,nc,p - dehl<(bc)
+;     nz,c,m - dehl>(bc)
+;     z,nc,p  - dehl=(bc)
+;
+;cmp_DEHL_adrBC
+;
+	inc	bc
+	inc	bc
+	inc	bc		
+	ld	a,(bc)			;сравнение байта +3
+	cp	d
+	jr	c,goto010		;d > (bc)
+	jr	nz,goto011		;d < (bc)
+	dec	bc
+	ld	a,(bc)			;сравнение байта +2
+	cp	e
+	jr	c,goto010		;e > (bc)
+	jr	nz,goto011		;e < (bc)
+	dec	bc
+	ld	a,(bc)			;сравнение байта +1
+	cp	h
+	jr	c,goto010		;h > (bc)
+	jr	nz,goto011		;h < (bc)
+	dec	bc
+	ld	a,(bc)			;сравнение байта +0
+	cp	l
+	jr	c,goto010		;l > (bc)
+	jr	nz,goto011		;l < (bc)
+
+;z,nc,p  - dehl=(bc)
+	xor	a
+	ret
+
+;nz,c,m - dehl>(bc)
+goto010	xor	a
+	sub	#01
+	ret
+
+;nz,nc,p - dehl<(bc)
+goto011	xor	a
+	add	a,#01
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+StoreCLSCurrDir	ifused
+;сохранение/восстановление адреса начала текущего каталога во временной переменной
+;вх:  cy=0 сохранение адреса
+;     cy=1 восстановление адреса
+;
+;StoreCLSCurrDir
+;
+	push	hl
+	push	de
+	ld	hl,CLS_CurrDir
+	ld	de,tmpDIR
+	jr	nc,goto132
+	ex	de,hl
+	jr	goto132	
+	jr	CopyDWORD_HL_DE
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+CopyDWORD_HL_DE	ifused
+;копирование двойного слова из адреса в hl по адресу в de
+;
+;CopyDWORD_HL_DE
+;
+	push	hl
+	push	de
+goto132	push	bc
+	ld	bc,#0004
+	ldir
+	pop	bc
+	pop	de
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+Inc_addrHL	ifused
+;инкремент переменной DWORD под адресу в hl
+;вых: z - переполнение переменная стала =#00000000
+;Inc_addrHL
+;
+	inc	(hl)
+	ret	nz
+	inc	hl
+	inc	(hl)
+	ret	nz
+	inc	hl
+	inc	(hl)
+	ret	nz
+	inc	hl
+	inc	(hl)
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+Inc_DEHL	ifused
+;инкремент dehl=dehl+1
+;вых: z - переполнение dehl=#00000000
+;Inc_DEHL
+;
+	inc	l
+	ret	nz
+	inc	h
+	ret	nz
+	inc	e
+	ret	nz
+	inc	d
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+Dec_DEHL	ifused
+;декремент dehl=dehl-1
+;Dec_DEHL
+;
+	dec	hl
+	ld	a,l
+	and	h
+	inc	a
+	ret	nz
+	dec	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+LD_DEHL_adrHL	ifused
+;загрузка числа в регистры из памяти
+;вх:  hl - адрес откуда грузим
+;вых: dehl - число
+;
+;LD_DEHL_adrHL
+;
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	inc	hl
+	push	de
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+Add_DEHL_adrBC	ifused
+;сложение 4х-байтного числа по адресу bc и dehl
+;вых: dehl=dehl+(bc)
+;
+;Add_DEHL_adrBC
+;
+	ld	a,(bc)
+	inc	bc
+	add	a,l
+	ld	l,a
+	ld	a,(bc)
+	inc	bc
+	adc	a,h
+	ld	h,a
+	ld	a,(bc)
+	inc	bc
+	adc	a,e
+	ld	e,a
+	ld	a,(bc)
+	adc	a,d
+	ld	d,a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+;деление dehl=dehl/a (a - степень двойки)
+;
+loop034	srl	d
+	rr	e
+	rr	h
+	rr	l
+;
+SRL_dehl_A
+;
+	rrca
+	jr	nc,loop034
+	ret
+
+;==============================================================================

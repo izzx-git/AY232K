@@ -1,0 +1,575 @@
+;Процедуры  FAT Driver. обработка запросов пользователя
+;файл DrvFAT.rst.a80
+;
+;WriteDataToFile	запись данных из памяти в файл
+;ReadDataFromFile	чтение данных из файла в память
+;tmWrSecHDD_hl		прямая запись сектора из памяти по адресу в hl
+;			(для теневого монитора)
+;WrSecHDD_hl		прямая запись сектора из памяти по адресу в hl
+;tmRdSecHDD_hl		прямое чтение сектора в память по адресу в hl
+;			(для теневого монитора)  при попадании памяти на
+;			системные области, читаем через буфер
+;RdSecHDD_hl		прямое чтение сектора в память по адресу в hl
+;
+;------------------------------------------------------------------------------
+WriteDataToFile	ifused
+;запись данных из памяти в файл
+;  файл должен быть открыт
+;  в fcb должны быть установлены: fcbName, fcbExt, fcbClsFile, fcbClsDIR,
+;    fcbSize, fcbOffset, fcbPart
+;вх:  ix - адрес fcb
+;     hl - адрес в памяти для записи
+;     bc - количество байт для записи
+;вых: cy=1 ошибки
+;        a=errNumTooBig - слишком большой размер, более #FFFF кластеров
+;        a=errRWnum - код ошибки
+;        a=errFileEmpty - нулевой размер файла
+;        a=errDiskNoSpace
+;        a=errInvalidPart
+;        a=errEoF - файл прервался
+;        a=errFileNotFound
+;     cy=0 данные записаны
+;       hl следующий адрес для записи
+;
+;WriteDataToFile
+;
+	push	hl
+	push	bc
+
+;рассчитаем на сколько нужно увеличить размер файла
+;  разность offset-size+BC
+	call	LD_DEHL_fcbOffset
+	push	de
+	push	hl
+	call	LD_DEHL_fcbSize
+	ex	de,hl
+	ex	(sp),hl
+	or	a
+	sbc	hl,de
+	pop	de
+	ex	(sp),hl
+	sbc	hl,de
+	ex	de,hl
+	pop	hl		;dehl = offset - size
+	add	hl,bc
+	jr	nc,goto106
+	inc	de		;dehl = offset - size + BC
+goto106	ld	a,d             ;       размер на который нужно увеличить файл
+	or	e
+	or	h
+	or	l
+	jr	z,goto107	;=#00 места хватает
+	ld	a,d
+	rla
+	jr	c,goto107	;<#00 места хватает
+;dehl на сколько байт нужно увеличить размер файла
+
+;расширим файл на dehl байт
+	call	addBytesToFile
+	jr	c,goto115
+
+;расчет смещения в секторах
+goto107	call	LD_DEHL_fcbOffset;dehl смещение в файле
+loop043	xor	a
+	srl	d
+	jr	nz,goto108	;слишком большой указатель
+	rr	e
+	rr	h
+	rla
+	ld	b,a
+	ld	c,l
+	ld	d,e
+	ld	e,h
+	ld	hl,#0200
+	sbc	hl,bc
+;hl сколько байт до конца сектора можно записать
+;de смещение от начала файла в секторах (512b)
+;bc смещение в секторе
+
+;определим нужно записывать целый сектор или только его часть
+	ex	de,hl
+	ex	(sp),hl
+	or	a
+	sbc	hl,de
+	add	hl,de
+	jr	nc,goto109
+	ld	d,h
+	ld	e,l	
+goto109	pop	af
+	ex	(sp),hl
+	push	af
+	ex	(sp),hl
+	ex	de,hl
+	ld	a,l
+	or	a
+	jr	nz,goto110		;пишем часть сектора
+	ld	a,h
+	cp	#02
+	jr	nz,goto110		;пишем часть сектора
+;hl сколько байт нужно записать в сектор
+;de смещение от начала файла в секторах (512b)
+;bc смещение в секторе
+
+;пишем сектор целиком
+	pop	hl
+	call	tmWrSecHDD_hl
+	jr	nc,goto111
+
+;ошибка записи
+goto112	pop	bc
+	ret
+goto108	ld	a,errNumTooBig
+goto115	pop	bc
+	pop	hl
+	scf
+	ret
+
+
+;пишем часть сектора
+goto110	push	hl
+	push	bc
+	ld	hl,Buf4File
+	push	hl
+	call	RdSecHDD_hl	;прочитали сектор в буфер
+	pop	hl
+	pop	bc
+	push	af
+	add	hl,bc
+	pop	af
+	pop	bc
+	pop	de
+	ex	de,hl
+	jr	c,goto112	;ошибка чтения
+	IFDEF	forProfROM
+	 bit	5,(iy+#0B)
+	 jr	z,goto113	;вызов из монитора
+	 call	Rom7.CheckAdrMem;определение попадания области чтения на системную память
+	 jr	nc,goto113
+	 push	bc
+	 rst	#30
+	 dw	Rom2.copyUserRamToRam8	;копирование памяти в буфер
+	 db	#02
+	 jr	goto114
+	ENDIF
+	IFDEF	forRRL
+	 bit	5,(iy+P0Bh)
+	 jr	z,goto113		;вызов из монитора
+	 call	r8d.CheckAdrMem		;определение попадания области чтения на системную память
+	 jr	nc,goto113
+	 push	bc
+	 UserMemToBuf
+;	 call	Rom2.copyUserRamToRam8	;копирование памяти в буфер
+	 jr	goto114
+	ENDIF
+
+goto113	push	bc
+	ldir
+goto114	push	hl
+	ld	hl,Buf4File
+	hddWriteSecHL		;запись сектора из памяти на винчестер
+	pop	hl
+	pop	bc
+	ld	a,errRWnum
+	jr	c,goto112	;ошибка записи
+
+
+;следующий сектор
+goto111	ex	(sp),hl
+	or	a
+	sbc	hl,bc
+	push	hl
+	push	af
+	ld	h,b
+	ld	l,c
+	call	add2Offset_HL
+	pop	af
+	IFDEF	forRRL
+	 jp	nz,loop043
+	ELSE
+	 jr	nz,loop043
+	ENDIF
+	pop	hl
+
+
+;выход
+	pop	hl
+	or	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+ReadDataFromFile	ifused
+;чтение данных из файла в память
+;  файл должен быть открыт
+;  в fcb должны быть установлены: fcbClsFile, fcbOffset
+;вх:  ix - адрес fcb
+;     hl - адрес для чтения
+;     bc - количество байт для чтения
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0 данные прочитаны
+;       hl следующий адрес для чтения
+;
+;ReadDataFromFile
+;
+	push	hl
+	push	bc
+
+;расчет смещения в секторах
+;	call	LD_DEHL_fcbOffset	;dehl указатель в файле
+	ld	l,#00
+	call	add2OffsetEOF_L		;dehl указатель в файле
+	ld	a,errEoF
+	jr	c,goto187		;вне пределов файла
+loop033	xor	a
+	srl	d
+	jr	nz,goto082
+	rr	e
+	rr	h
+	rla
+	ld	b,a
+	ld	c,l
+	ld	d,e
+	ld	e,h
+;	or	l
+;	jr	z,goto083
+;	inc	de
+;	ld	a,e
+;	or	d
+;	jr	z,goto082
+goto083	ld	hl,#0200
+	sbc	hl,bc
+;hl сколько байт до конца сектора можно считать
+;de смещение от начала файла в секторах (512b)
+;bc смещение в секторе
+
+
+;определим нужно загружать целый сектор или только его часть
+	ex	de,hl
+	ex	(sp),hl
+	or	a
+	sbc	hl,de
+	add	hl,de
+	jr	nc,goto084
+	ld	d,h
+	ld	e,l	
+goto084	pop	af
+	ex	(sp),hl
+	push	af
+	ex	(sp),hl
+	ex	de,hl
+	ld	a,l
+	or	a
+	jr	nz,goto085		;читаем часть сектора
+	ld	a,h
+	cp	#02
+	jr	nz,goto085		;читаем часть сектора
+;hl сколько байт нужно прочитать из сектора
+;de смещение от начала файла в секторах (512b)
+;bc смещение в секторе
+
+
+;читаем сектор целиком
+	pop	hl
+	call	tmRdSecHDD_hl
+	jr	nc,goto086
+
+;ошибка чтения
+goto087	pop	bc
+	ret
+goto082	ld	a,errNumTooBig
+goto187	pop	bc
+	pop	hl
+	scf
+	ret
+
+
+;читаем часть сектора
+goto085	push	hl
+	push	bc
+	ld	hl,Buf4File
+	push	hl
+	call	RdSecHDD_hl
+	pop	hl
+	pop	bc
+	push	af
+	add	hl,bc
+	pop	af
+	pop	bc
+	pop	de
+	jr	c,goto087
+	IFDEF	forProfROM
+	 bit	5,(iy+#0B)
+	 jr	z,goto088		;вызов из монитора
+	 ex	de,hl
+	 call	Rom7.CheckAdrMem	;определение попадания области чтения на системную память
+	 ex	de,hl
+	 jr	nc,goto088
+	 push	bc
+	 rst	#30
+	 dw	Rom2.copyRam8ToUserRam	;восстановление области памяти из ram 8	
+	 db	#02
+	 pop	bc
+	 ex	de,hl
+	 jr	goto086
+	ENDIF
+	IFDEF	forRRL
+	 bit	5,(iy+P0Bh)
+	 jr	z,goto088		;вызов из монитора
+	 ex	de,hl
+	 call	r8d.CheckAdrMem		;определение попадания области чтения на системную память
+	 ex	de,hl
+	 jr	nc,goto088
+	 push	bc
+	 call	Rom2.copyRam8ToUserRam	;восстановление области памяти из ram 8	
+	 pop	bc
+	 ex	de,hl
+	 jr	goto086
+	ENDIF
+
+goto088	push	bc
+	ldir
+	pop	bc			;bc количество прочитанных байт из сектора
+	ex	de,hl			;hl следующий адрес для чтения 
+
+
+;следующий сектор
+;(sp) bc - оставшееся количество байт для чтения
+;hl следующий адрес для чтения
+;bc количество прочитанных байт
+goto086	ex	(sp),hl
+	or	a
+	sbc	hl,bc
+	push	hl
+	push	af
+	ld	h,b
+	ld	l,c
+	call	add2OffsetEOF_HL	;cy=1 указатель был вне пределов файла -> установлен в начало
+	pop	bc
+	jr	c,goto186		;конец файла
+	push	bc
+	pop	af
+	jr	nz,loop033
+goto186	pop	hl
+
+
+;выход
+	pop	hl
+	or	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+tmWrSecHDD_hl	ifused
+;прямая запись сектора из памяти по адресу в hl (для теневого монитора)
+;  при попадании памяти на системные области, пишем через буфер
+;вх:  ix - адрес fcb
+;     hl - адрес для записи
+;     de - смещение от начала файла в секторах (512b)
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0, nz - писали напрямую из памяти
+;     cy=0, z - перекидывали в буфер, потом писали из буфера
+;       hl - следующий адрес в памяти
+;       bc=#0200 количество записанных байт
+;     de,bc,a - ???
+;
+;tmWrSecHDD_hl
+;
+	IFDEF	forProfROM
+	 bit	5,(iy+#0B)
+	 jr	z,WrSecHDD_hl		;вызов из монитора
+	 ld	bc,#0200		;размер сектора
+	 call	Rom7.CheckAdrMem	;определение попадания области чтения на системную память
+	 jr	nc,WrSecHDD_hl		;копировать не надо
+	 push	bc
+	 push	de
+	 ld	de,Buf4File
+	 push	de
+	 rst	#30
+	 dw	Rom2.copyUserRamToRam8	;копирование памяти в буфер
+	 db	#02
+	 pop	de
+	 ex	(sp),hl
+	 ex	de,hl
+	 call	WrSecHDD_hl		;запись сектора
+	 pop	hl
+	 pop	bc
+	 ret
+	ENDIF
+	IFDEF	forRRL
+	 bit	5,(iy+P0Bh)
+	 jr	z,WrSecHDD_hl		;вызов из монитора
+	 ld	bc,#0200		;размер сектора
+	 call	r8d.CheckAdrMem		;определение попадания области чтения на системную память
+	 jr	nc,WrSecHDD_hl		;копировать не надо
+	 push	bc
+	 push	de
+	 ld	de,Buf4File
+	 push	de
+	 call	Rom2.copyUserRamToRam8	;копирование памяти в буфер
+	 pop	de
+	 ex	(sp),hl
+	 ex	de,hl
+	 call	WrSecHDD_hl		;запись сектора
+	 pop	hl
+	 pop	bc
+	 ret
+	ENDIF
+	jr	WrSecHDD_hl
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+WrSecHDD_hl	ifused
+;прямая запись сектора из памяти по адресу в hl
+;вх:  ix - адрес fcb
+;     hl - адрес для записи
+;     de - смещение от начала файла в секторах (512b)
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0 - сектор записан
+;       hl - следующий адрес в памяти
+;       bc=#0200 количество записанных байт
+;     de,a - ???
+;
+;WrSecHDD_hl
+;
+	push	ix
+	ex	(sp),hl
+	ld	bc,fcbClsFile
+	add	hl,bc		;адрес с номером первого кластера файла
+	call	CalcAdrSecInFile;dehl - LBA адрес сектора
+;	jr	c,goto105	;ошибка
+	jr	c,goto081	;ошибка
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+	pop	hl
+	hddWriteSecHL		;запись сектора из памяти на винчестер
+	jr	goto185
+;	ld	a,errRWnum
+;	ret	c		;ошибка чтения записи
+;	ld	bc,#0200
+;	add	hl,bc
+;	or	a
+;	ret
+;goto105	pop	hl
+;	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+tmRdSecHDD_hl	ifused
+;прямое чтение сектора в память по адресу в hl (для теневого монитора)
+;  при попадании памяти на системные области, читаем через буфер
+;вх:  ix - адрес fcb
+;     hl - адрес для чтения
+;     de - смещение от начала файла в секторах (512b)
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0, nz - читали напрямую в память
+;     cy=0, z - читали в буфер, потом перекидывали в память пользователя
+;       hl - следующий адрес в памяти
+;       bc=#0200 количество прочитанных байт
+;     de,bc,a - ???
+;
+;tmRdSecHDD_hl
+;
+	IFDEF	forProfROM
+	 bit	5,(iy+#0B)
+	 jr	z,RdSecHDD_hl		;вызов из монитора
+	 ld	bc,#0200		;размер сектора
+	 call	Rom7.CheckAdrMem	;определение попадания области чтения на системную память
+	 jr	nc,RdSecHDD_hl		;копировать не надо
+	 push	hl
+	 ld	hl,Buf4File
+	 call	RdSecHDD_hl
+	 pop	de
+	 ret	c			;были ошибки чтения
+	 ld	hl,Buf4File
+	 push	bc
+	 rst	#30
+	 dw	Rom2.copyRam8ToUserRam	;восстановление области памяти из ram 8	
+	 db	#02
+	 pop	bc
+	 ex	de,hl
+	 xor	a
+	 ret
+	ENDIF
+	IFDEF	forRRL
+	 bit	5,(iy+P0Bh)
+	 jr	z,RdSecHDD_hl		;вызов из монитора
+	 ld	bc,#0200		;размер сектора
+	 call	r8d.CheckAdrMem		;определение попадания области чтения на системную память
+	 jr	nc,RdSecHDD_hl		;копировать не надо
+	 push	hl
+	 ld	hl,Buf4File
+	 call	RdSecHDD_hl
+	 pop	de
+	 ret	c			;были ошибки чтения
+	 ld	hl,Buf4File
+	 push	bc
+	 call	Rom2.copyRam8ToUserRam	;восстановление области памяти из ram 8	
+	 pop	bc
+	 ex	de,hl
+	 xor	a
+	 ret
+	ENDIF
+	jr	RdSecHDD_hl
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+RdSecHDD_hl	ifused
+;прямое чтение сектора в память по адресу в hl
+;вх:  ix - адрес fcb
+;     hl - адрес для чтения
+;     de - смещение от начала файла в секторах (512b)
+;вых: cy=1 были ошибки
+;       a=errRWnum
+;       a=errInvalidPart
+;       a=errEoF - файл прервался
+;       a=errFileEmpty
+;     cy=0 - сектор прочитан
+;       hl - следующий адрес в памяти
+;       bc=#0200 количество прочитанных байт
+;     de,a - ???
+;
+;RdSecHDD_hl
+;
+	push	ix
+	ex	(sp),hl
+	ld	bc,fcbClsFile
+	add	hl,bc		;адрес с номером первого кластера файла
+	call	CalcAdrSecInFile;dehl - LBA адрес сектора
+	jr	c,goto081	;ошибка
+	hddSetCurrSec		;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+	pop	hl
+	hddReadSec2HL		;чтение сектора с винчестера в буфер
+goto185	ld	a,errRWnum
+	ret	c		;ошибка чтения записи
+	ld	bc,#0200
+	add	hl,bc
+	or	a
+	ret
+goto081	pop	hl
+	ret
+
+	endif
+
+;==============================================================================

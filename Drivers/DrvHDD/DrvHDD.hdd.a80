@@ -1,0 +1,545 @@
+;Процедуры  HDD Driver. процедуры для работы с накопителем
+;файл DrvHDD.hdd.a80
+;
+;hddRdWrSectors		прямое чтение/запись группы секторов в память
+;hddSendCmdRW		установка регистров и подача команды винчестеру
+;			на чтение/запись
+;hddReadMBRsec		чтение сектора MBR в буфер
+;RdSecHDD_DEHL		чтение сектора с винчестера в буфер xE5A9
+;RdSecHDD_IX		чтение сектора с винчестера в буфер ix
+;RdSecHDD_HL		чтение сектора с винчестера в буфер HL
+;RdSecHDD_buf		чтение сектора с винчестера в буфер xE5A9
+;WrSecHDD_DEHL		запись сектора из буфера xE5A9 на винчестер по адресу
+;			в dehl
+;WrSecHDD_IX		запись сектора из буфера ix на винчестер
+;WrSecHDD_buf		запись сектора из буфера xE5A9 на винчестер
+;WrSecHDD_HL		запись сектора из буфера HL на винчестер
+;hddSetVarLBAadr	расчет и установка в переменных адреса LBA/CHS
+;			в зависимости от настроек
+;hddHddIdent		идентификация текущего жесткого диска
+;
+;------------------------------------------------------------------------------
+hddRdWrSectors	ifused
+;прямое чтение/запись группы секторов в память
+;вх:  номер первого сектора должен быть установлен в переменных
+;     hl - адрес для чтения
+;     b  - количество секторов для чтения
+;     cy=0/1 - чтение/запись
+;     (AdrLBA32) - LBA адрес первого сектора
+;вых: cy=1 ошибки чтения/записи
+;       a=#57 - код ошибки драйвера
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;hddRdWrSectors
+;
+	IFDEF	SDcard
+	 IFDEF	ver1_10			;для версии v1.10
+	  ld	a,(drvDevice)
+	  cpl
+	  rla
+	  and	%01100001
+	  rra
+	  jr	nz,goto060		;работа с винчестером
+	 ELSE				;для версии v1.00
+	  ld	a,(selHdd)
+	  bit	2,a
+	  jr	z,goto060		;работа с винчестером
+	 ENDIF
+;работа с SD картой
+	 ld	a,b
+	 ld	(secCounter),a
+	 push	hl
+	 ld	hl,goto061
+	 ex	(sp),hl
+	 jp	c,sdWriteSecs_HL	;запись
+	 jp	sdReadSecs_HL		;чтение
+goto060
+	ENDIF
+
+;работа с винчестером (чтение секторов группой)
+	IFDEF	MultiRW
+	 call	hddSendCmdRW		;подача команды винчестеру на чтение/запись
+	 jr	c,goto040		;ошибка
+;  чтение/запись данных в буфер адресуемый hl
+loop032	 push	bc
+	 rr	c
+	 push	af
+	 call	nc,kHddReadData		;чтение
+	 pop	af
+	 call	c,kHddWriteData		;запись
+	 pop	bc
+	 inc	h
+	 inc	h
+	 djnz	loop032
+;работа с винчестером (чтение секторов по одному)
+	ELSE
+loop032	 call	hddSendCmdRW		;подача команды винчестеру на чтение/запись
+	 jr	c,goto040		;ошибка
+;  чтение/запись сектора в буфер адресуемый hl
+	 push	bc
+	 rr	c
+	 push	af
+	 call	nc,kHddReadData		;чтение
+	 pop	af
+	 call	c,kHddWriteData		;запись
+	 inc	h
+	 inc	h
+;  установка адреса следующего сектора
+	 push	hl
+	 ld	hl,(AdrLBA32+0)		;запись номера LBA32 сектора в переменные
+	 ld	de,(AdrLBA32+2)
+	 inc	hl
+	 ld	a,h
+	 or	l
+	 jr	nz,goto069
+	 inc	de
+goto069	 call	hddSetVarLBAadr
+	 pop	hl
+	 pop	bc
+	 rr	c
+	 djnz	loop032
+	ENDIF
+
+;выход
+	call	hddCheckError		;проверка ошибок
+goto040	call	c,kHddReset		;програмный сброс винчестера при ошибке
+goto061	ld	hl,idePort1F2
+	ld	(hl),#01
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddSendCmdRW	ifused
+;установка регистров и подача команды винчестеру на чтение/запись
+;вх:  номер первого сектора должен быть установлен в переменных
+;     b  - количество секторов для чтения
+;     cy=0/1 - чтение/запись
+;вых: cy=1 ошибки чтения/записи
+;       a=#57 - код ошибки драйвера
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;     cy=0 ошибок не было
+;       hl,b - не меняются
+;       0,c/e =0/1 - чтение/запись
+;
+;hddSendCmdRW
+;
+	push	hl
+	push	bc
+	push	af
+	IFDEF	MultiRW
+	 ld	a,b
+	ELSE
+	 ld	a,#01
+	ENDIF
+	ld	(idePort1F2),a
+	ld	hl,idePort1F7r		;код команды винчестера: чтение
+	jr	nc,goto039
+	inc	hl			;код команды винчестера: запись
+goto039	ld	a,(hl)
+	call	hddSendCmd		;посылаем команду винчестеру
+	call	nc,hddWaitReadyData	;ожидание готовности HDD к передаче данных
+	pop	de
+	pop	bc
+	ld	c,e			;0,c=0/1 чтение/запись
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddReadMBRsec	ifused
+;чтение сектора MBR в буфер
+;вых: cy=1, z/nz ошибка чтения
+;       a=errRWnum
+;     cy=0, nz нет сигнатуры MBR
+;     cy=0, z сигнатура найдена
+;
+;hddReadMBRsec
+;
+	call	SetZeroDEHL
+	ld	a,#01
+	ld	(idePort1F2),a		;число передаваемых секторов данных при операциях чтения/записи (=#00->=#100)
+   	call	RdSecHDD_DEHL		;чтение нулевого сектора с винчестера в буфер BufSecHdd
+	ld	a,errRWnum
+	ret	c			;ошибка чтения
+
+;проверка сигнатуры MBR
+	ld	hl,(Buf4MBR+#1FE)
+	ld	de,#AA55	;сигнатура (55h AAh)
+	or	a
+	sbc	hl,de
+	scf
+	ccf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+RdSecHDD_DEHL	ifused
+;чтение сектора с винчестера в буфер xE5A9
+;вх:  dehl - смещение в секторах (512b) от начала винчестера до нужного сектора
+;вых: cy=0 -> hl - адрес буфера
+;     cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;RdSecHDD_DEHL
+;
+	call	hddSetVarLBAadr		;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+ 	jr	RdSecHDD_buf
+
+	endif
+
+;------------------------------------------------------------------------------
+RdSecHDD_IX	ifused
+;чтение сектора с винчестера в буфер ix
+;  LBA адрес сектора должен быть установлен в регистрах винчестера
+;вх:  ix - адрес буфера для чтения сектора
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;RdSecHDD_IX
+;
+	push	ix
+	pop	hl
+	jr	RdSecHDD_HL
+	endif
+
+;------------------------------------------------------------------------------
+RdSecHDD_buf	ifused
+;чтение сектора с винчестера в буфер xE5A9
+;  LBA адрес сектора должен быть установлен в регистрах винчестера
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;RdSecHDD_buf
+;
+	ld	hl,BufSecHdd
+	jr	RdSecHDD_HL
+	org	$-2
+	endif
+
+RdSecHDD_HL	ifused
+;
+	IFDEF	SDcard
+	 IFDEF	ver1_10			;для версии v1.10
+	  ld	a,(drvDevice)
+	  cpl
+	  and	%00110000
+	  jp	z,sdReadSecs_HL		;работа с SD картой
+	 ELSE				;для версии v1.00
+	  ld	a,(selHdd)
+	  bit	2,a
+	  jp	nz,sdReadSecs_HL	;работа с SD картой
+	 ENDIF
+	ENDIF
+goto037	ld	a,(idePortErrCnt)	;количество дополнительных попыток записи сектора
+	ld	b,a
+loop031	push	bc
+	ld	a,(idePort1F7r)		;код команды винчестера
+	push	hl
+	call	hddSendCmd		;посылаем команду винчестеру
+	call	nc,hddWaitReadyData	;ожидание готовности HDD к передаче данных
+	call	c,kHddReset		;ошибка
+	pop	hl
+	call	nc,kHddReadData		;чтение 512b данных в буфер адресуемый hl
+	call	nc,hddCheckError
+	pop	bc
+	ret	nc
+	djnz	loop031
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+WrSecHDD_DEHL	ifused
+;запись сектора из буфера xE5A9 на винчестер по адресу в dehl
+;вх:  dehl - LBA адрес сектора
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;WrSecHDD_DEHL
+;
+	call	hddSetVarLBAadr		;расчет и установка в переменных адреса LBA/CHS
+	jr	WrSecHDD_buf		;запись сектора из буфера xE5A9 на винчестер
+
+	endif
+
+;------------------------------------------------------------------------------
+WrSecHDD_IX	ifused
+;запись сектора из буфера ix на винчестер
+;  LBA адрес сектора должен быть установлен в регистрах винчестера
+;вх:  ix - адрес буфера для записи сектора
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;WrSecHDD_IX
+;
+	push	ix
+	pop	hl
+	jr	WrSecHDD_HL
+	endif
+
+;------------------------------------------------------------------------------
+WrSecHDD_buf	ifused
+;запись сектора из буфера Buf4MBR на винчестер
+;  LBA адрес сектора должен быть установлен в регистрах винчестера
+;вых: cy=1 ошибки винчестера  -> a - код ошибки
+;       a=#57 hard disk R/W error
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;WrSecHDD_buf
+;
+	ld	hl,BufSecHdd
+	jr	WrSecHDD_HL
+	org	$-2
+	endif
+
+WrSecHDD_HL	ifused
+;
+	IFDEF	SDcard
+	 IFDEF	ver1_10			;для версии v1.10
+	  ld	a,(drvDevice)
+	  cpl
+	  and	%00110000
+	  jp	z,sdWriteSecs_HL	;работа с SD картой
+	 ELSE				;для версии v1.00
+	  ld	a,(selHdd)
+	  bit	2,a
+	  jp	nz,sdWriteSecs_HL	;работа с SD картой
+	 ENDIF
+	ENDIF
+goto036	ld	a,(idePortErrCnt)	;количество дополнительных попыток записи сектора
+	ld	b,a
+loop030	push	bc
+	ld	a,(idePort1F7w)		;код команды винчестера
+	push	hl
+	call	hddSendCmd		;посылаем команду винчестеру 
+	call	nc,hddWaitReadyData	;ожидание готовности HDD к передаче данных
+	call	c,kHddReset		;ошибка
+	pop	hl
+	call	nc,kHddWriteData	;запись 512b данных из буфера адресуемого hl
+	call	nc,hddCheckError	;проверка на ошибки и выход
+	pop	bc
+	ret	nc			;нет ошибок
+	djnz	loop030			;еще раз попытаемся записать
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddSetVarLBAadr	ifused
+;расчет и установка в переменных адреса LBA/CHS в зависимости от настроек
+;вх:  dehl - LBA адрес сектора
+;вых: (idePort1F2) параметры LBA/CHS в зависимости от настроек
+;     (AdrLBA32) = dehl вх
+;
+;hddSetVarLBAadr
+;
+	ld	(AdrLBA32+0),hl		;запись номера LBA32 сектора в переменные
+	ld	(AdrLBA32+2),de
+	IFDEF	ver1_10			;для версии v1.10
+	 ld	a,(drvDevice)
+	 cpl
+	 and	%00110000
+	 ret	z			;работа с SD в режиме LBA
+ 	 ld	a,(devFlags)
+	 and	#F0
+	 or	%10100000
+	ELSE				;для версии v1.00
+	 ld	a,(selHdd)
+	 bit	2,a
+	 ret	nz			;работа с SD в режиме LBA
+	 ld	a,(devPort1F6)
+	 and	#F0
+	ENDIF
+	bit	6,a
+	jr	nz,goto035		;работа с винчестером в режиме LBA
+
+;работа с винчестером в режиме CHS
+	push	af
+	call	hddLBAtoCHS		;преобразование адреса LBA в C/H/S
+	and	#0F
+	pop	hl
+	or	h
+	ld	(idePort1F6),a		;головка
+	ld	a,c
+	ld	(idePort1F3),a		;сектор
+	ld	(idePort1F4),de		;цилиндр
+	ret
+
+;запись номера LBA сектора в переменные
+goto035	ld	(idePort1F3),hl
+	or	d
+	ld	d,a
+	ld	(idePort1F5),de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+hddHddIdent	ifused
+;идентификация текущего жесткого диска
+;вх:  ix - адрес буфера для загрузки сектора идентификации
+;     iy - адрес начала блока переменных винчестера
+;     4,(iy+#0A) =0/1 master/slave
+;вых: cy=1 ошибки
+;       a=#56 hard disk not found
+;       a=#57 hard disk R/W error
+;       a=#58 hard disk undefined
+;       a=#60 busy not found
+;       a=#61 hard disk not ready
+;       a=#62 hard disk data not ready
+;
+;hddHddIdent
+;
+	xor	a
+	ld	(ideError),a		;сброс ошибки дискового интерпретатора
+	IFDEF	ver1_10			;для версии v1.10
+	 ld	a,(iy+#0A)
+	 and	%00010000
+	 ld	(iy+#0A),a		;сбросим все параметры винчестера
+	 or	#A0
+	ELSE				;для версии v1.00
+	 ld	(iy+#0A),a
+	 ld	a,(iy+#0B)
+	 and	%10110000
+	ENDIF
+	ld	(idePort1F6),a		;установим базовое значение порта
+	ld	d,a
+
+;для SMUC разрешаем прерывания
+;	ld	a,(drvDevice)
+;	and	%00110000
+;	jr	nz,goto029		;это не SMUC
+;  разрешение прерываний от винчестера
+;	ld	bc,#FFBA
+;	ld	a,#F7			;переключение на теневые регистры без сброса
+;	call	out_C_A_2A53		;device control/alt status
+;	push	bc
+;	ld	bc,#FEBE
+;	xor	a
+;	call	out_C_A_2A53
+;	pop	bc
+;	ld	a,#77
+;	call	out_C_A_2A53		;вернем регистр команд
+;	djnz	$			;задержка
+	call	kHddReset
+goto029	ld	bc,(kPort1F6)		;установим какой винт инициализировать master/slave
+	ld	a,d
+	call	kOut_C_A
+	IFDEF	PROFIide
+	 call	Pause70k
+	ENDIF
+	ld	bc,(kPort1F7)		;bc - регистр состояния
+	call	kIn_A_C			;определяем есть ли винчестер на канале
+	inc	a
+	cp	#02			;прочитано #00/#FF -> нет винчестера
+
+;чтение сектора идентификации и установка переменных геометрии винчестера
+	ld	a,d
+	call	nc,hddTestInit		;определение наличия винчестера
+	ld	a,#56
+	ret	c			;нет винчестера
+
+;чтение параметров из сектора идентификации
+	push	ix
+	pop	hl
+	xor	a
+	or	(hl)
+	inc	hl
+	or	(hl)
+	inc	hl
+	jr	z,goto030		;ошибка в секторе идентификации
+	push	iy
+	pop	de
+	ldi				;цилиндров (младший байт)
+	ldi				;цилиндров (старший байт)
+	inc	hl
+	inc	hl
+	ldi				;головок
+	ld	bc,#0006-1
+	add	hl,bc
+	ld	a,(hl)			;секторов
+	ldi				;секторов
+	ld	c,#6C-1			;108
+	add	hl,bc			;hl= +120 (слово +60) количество LBA секторов
+	inc	de
+	inc	de
+	ld	c,#04
+	ldir				;количество LBA секторов
+
+;расчет произведения головок и секторов
+	ld	e,(iy+#02)		;кол-во головок
+;	ld	a,(iy+#03)		;кол-во секторов
+	call	calcHLequEmulA
+	ld	(iy+#04),l
+	ld	(iy+#05),h		;произведение head * sectors
+
+;проверка геометрии CHS
+	ld	a,(iy+#00)		;цилиндров (младший байт)
+	or	(iy+#01)
+	jr	z,goto031		;не пройдена. ноль цилиндров
+	xor	a
+	or	(iy+#02)
+	jr	z,goto031		;не пройдена. ноль головок
+	xor	a
+	or	(iy+#03)
+	jr	z,goto031		;не пройдена. ноль секторов
+	ld	a,(iy+#04)
+	or	(iy+#05)
+	jr	z,goto031		;не пройдена. нулевое произведение головок и секторов
+	set	5,(iy+#0A)		;есть поддержка CHS
+	IFDEF	ver1_00			;для версии v1.00
+	 res	6,(iy+#0B)		;включим CHS
+	ENDIF
+
+;проверка геометрии LBA
+goto031	ld	a,(iy+#06)
+	or	(iy+#07)
+	or	(iy+#08)
+	or	(iy+#09)
+	jr	z,goto032
+	set	6,(iy+#0A)		;есть поддержка LBA
+	IFDEF	ver1_00			;для версии v1.00
+	 set	6,(iy+#0B)		;включим LBA
+	ENDIF
+
+;если проверки пройдены, винчестер есть в системе
+goto032	ld	a,(iy+#0A)
+	and	%01100000
+	jr	z,goto030		;проверка геометрии винчестера не пройдена
+	set	7,(iy+#0A)
+	ret
+
+;ошибка #58. ошибка в секторе идентификации
+goto030	ld	a,#58
+	scf
+	ret
+
+	endif
+
+;==============================================================================
+;ПЕРЕМЕННЫЕ
+;==============================================================================

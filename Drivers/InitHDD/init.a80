@@ -1,0 +1,242 @@
+;------------------------------------------------------------------------------
+;подсчет количества доступных разделов на винчестерах
+;вх:  a - активные контроллеры HDD/SD
+;вых: hl,a - количество устройств
+;     typeDrive - сформированная таблица
+;
+navGetNumDrives
+;
+;проверка наличия DivMMC
+	IFDEF	useDivMMC
+	 di
+	 ld	a,#80
+	 out	(#E3),a
+	 ld	hl,(#0002)
+	 ld	de,#5E00
+	 or	a
+	 sbc	hl,de
+	 jr	nz,goto514		;DivMMC не найден
+; отключение сканирования SMUCv1, ATM-IDE
+	 IFDEF	SMUC
+	  ld	(_msSMUC+#0A),a
+	 ENDIF
+	 IFDEF	ATMide
+	  ld	(_msATM+#0A),a
+	 ENDIF
+	 IFDEF	PROFIide
+	  ld	(_msPROFI+#0A),a
+	 ENDIF
+	 call	#1FFA			;выключение rom DivMMC
+goto514	 ei
+	ENDIF
+
+;инициализация контроллеров и устройств на них
+	ld	de,typeDrive
+	push	de
+	ld	b,DrvHDD.devNums
+	ld	hl,tablDev
+	ld	ix,_Buf4MBR
+cng_19	ld	a,#FF
+loop061	push	bc
+	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)
+	inc	hl
+	push	bc
+	pop	iy
+	rrca
+	jr	nc,goto532
+	push	af
+	call	proc_11			;идентификация винчестеров/SD карт
+	pop	af
+goto532	inc	hl
+	pop	bc
+	djnz	loop061
+	ex	de,hl
+	pop	de
+
+;расчет количества найденных разделов
+	or	a
+	sbc	hl,de			;количество найденных разделов
+	ld	a,l
+	add	a,#04			;+fdd
+	ld	l,22
+	cp	l
+	jr	c,goto312
+	ld	a,l
+goto312	ld	l,a
+	ld	(numDrives),a
+	ret
+
+;таблица с номерами устройств
+;                        ccchpp
+tablDev
+;	IFDEF	SMUCv2
+	 dw _msSMUC:  db %00000000	;SMUC v2 master
+;	ENDIF
+;	IFDEF	SMUCv1
+	 dw _msSMUC:  db %00001000	;SMUC v1 master
+;	ENDIF
+;	IFDEF	NemoStd
+	 dw _msNemo:  db %00010000	;Nemo master
+;	ENDIF
+;	IFDEF	NemoA8
+	 dw _msNemo:  db %00011000	;Nemo A8 master
+;	ENDIF
+;	IFDEF	ATMide
+	 dw _msATM:   db %00100000	;ATM ide master
+;	ENDIF
+;	IFDEF	PROFIide
+	 dw _msPROFI: db %00101000	;ATM ide master
+;	ENDIF
+;	IFDEF	ZC
+	 dw _cardZC:  db %00110000	;SD ZC
+;	ENDIF
+;	IFDEF	DivMMC
+	 dw _mDivMMC: db %00111000	;SD DivMMC master
+;	ENDIF
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;идентификация контроллера и устройств на нём
+;вх:  hl - адрес в таблице с номерами устройств
+;     de - адрес в таблице разделов typeDrive
+;     ix - адрес буфера для загрузки сектора идентификации
+;     iy - адрес начала блока переменных винчестера master или SD карты 
+;вых: de - новый адрес в таблице разделов typeDrive
+;     iy,bc,a - ???
+;
+proc_11	ld	a,(hl)
+	cpl
+	and	%00110000
+	jr	z,loop060		;это SD карта
+	ld	a,(iy+#0A)		;master
+	or	(iy+#0A+11)		;slave
+	ret	m			;один из винчестеров найден
+
+;идентификация устройств
+;  установка устройства текущим
+loop060	ld	a,(hl)
+	rlca
+	rlca
+	and	#10
+	ld	(iy+#0A),a
+	ld	a,(hl)
+	call	DrvHDD.hddSetDevice
+;  идентификация винчестера		
+	push	hl
+	push	de
+	and	%00111000
+	cp	#30
+	jr	z,goto512		;это ZC
+	jr	nc,goto108		;это MMC
+	call	DrvHDD.kHddCheck	;проверим tr-dos для smuc v1
+	call	nc,DrvHDD.kPortsOn	;включим порты для ATM
+	call	nc,DrvHDD.kHddTestInit
+	jr	goto513
+;  идентификация SD карты ZC
+goto512	set	2,(hl)			;для ZC только одна карта
+goto108	di
+	call	DrvHDD.kHddTestInit	;инициализация SD карты
+	ld	hl,BufIDsd
+	call	nc,DrvHDD.sdReadCID
+	push	hl
+	call	nc,DrvHDD.sdReadCSD
+	pop	hl			;hl=BufIDsd+#10
+	push	af
+	call	nc,DrvHDD.sdCalcCapacity
+	in	a,(#7B)			;выключим кэш
+	pop	af
+	ei
+;  установка переменных устройства и формирование таблицы с доступными разделами
+goto513	pop	de
+	call	nc,DrvHDD.devSetVars
+	call	nc,proc_10		;формирование таблицы с доступными разделами
+	pop	hl
+	ld	bc,11
+	add	iy,bc
+	bit	2,(hl)
+	set	2,(hl)
+	jr	z,loop060
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+;формирование таблицы с доступными разделами на винчестере
+;вх:  (drvDevice) - номер контроллера и винчестера на нем
+;     de - адрес в таблице разделов typeDrive
+;вых: de - новый адрес в таблице разделов typeDrive
+;     b=#00
+;     hl,c,a - ???
+;
+proc_10	push	de
+	call	navFindPart
+	pop	de	
+	ret	c			;на текущем винчестере нет разделов
+	ex	de,hl
+	push	af
+	ld	a,(DrvHDD.drvDevice)
+	and	%00111100
+	ld	c,a			;номер винчестера и первого раздела
+	pop	af
+	ld	b,#04
+loop059	ld	(hl),#00
+	rra
+	jr	nc,goto106		;нет раздела
+	ld	(hl),c
+	set	6,(hl)			;=%01??zhpp MFS
+	rra
+	jr	nc,goto107		;это MFS
+	set	7,(hl)			;=%11??zhpp это FAT
+goto107	inc	hl
+	rla
+goto106	rra
+	inc	c
+	djnz	loop059
+	ex	de,hl
+	ret
+
+;------------------------------------------------------------------------------
+;поиск разделов FAT32 и MFS на текущем винчестере
+;вх:  ---
+;вых: cy=1 ошибка чтения/разделы не найдены
+;       a=#66 отсутствует MBR
+;       a=errInvalidPart разделы не найдены
+;     cy=0 раздел(ы) найден(ы)
+;       a,c - результат
+;       bit 1-0 тип 0го раздела =%00 раздел отсутствует либо неизвестен
+;                               =%01 это MFS раздел
+;                               =%11 это FAT32 раздел
+;       bit 3-2 тип 1го раздела
+;       bit 5-4 тип 2го раздела
+;       bit 7-6 тип 3го раздела
+;
+navFindPart
+;
+	ld	bc,#0400
+loop058	push	bc
+	ld	a,(DrvHDD.drvDevice)
+	and	#FC
+	dec	b
+	or	b
+	ld	l,a			;номер раздела
+	call	DrvFAT.GetAdrMFSorFAT
+ 	pop	bc
+	jr	c,goto104		;ошибки чтения/либо раздел не найден
+	cp	#53
+	IFNDEF	useMFS
+	jr	z,goto329
+	ENDIF
+	rl	c
+	scf
+	jr	goto105
+goto104	cp	DrvFAT.errInvalidPart
+	jr	nz,goto092		;ошибка чтения/либо нет MBR
+goto329	rl	c
+goto105	rl	c
+	djnz	loop058
+	ld	a,c
+	or	a
+	ret	nz
+	ld	a,DrvFAT.errInvalidPart
+goto092	scf
+	ret
+

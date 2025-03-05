@@ -1,0 +1,1176 @@
+;Процедуры  HDD Driver. процедуры для работы с портами контроллеров SD
+;файл DrvHDD.spi.a80
+;
+;sdWriteSecs_HL		запись блока секторов
+;sdReadSecs_HL		загрузка блока секторов
+;sdWriteDataSB512	одноблоковая запись 512b данных из буфера
+;sdWriteDataMB512	многоблоковая запись 512b данных из буфера
+;sdReadData512		чтение 512b данных в буфер адресуемый hl
+;sdCalcCapacity		расчет объема карты в блоках
+;sdReadCSD		чтение регистра CSD
+;sdReadCID		чтение регистра CID
+;sdTestInit		определение наличия и инициализация SDC/MMC карты
+;sdSendAcmd_41		запуск инициализации (только для SDC)
+;sdSendCmd_24		запуск односекторной записи
+;sdSendCmd_25		запуск много-секторной записи (завершение производится по стоп токену!)
+;sdSendCmd_17		запуск односекторного чтения
+;sdSendCmd_18		запуск много-секторного чтения (завершение производится по cmd12)
+;sdSendCmd_12		завершение передачи данных (вызывается при завершении
+;			много-секторного чтения)
+;sdSendCmd_10		чтение CID
+;sdSendCmd_09		чтение CSD
+;sdSendCmd_58		чтение OCR
+;sdSendCmd_55		вызывается перед ACMD<n>
+;sdSendCmd_01		запуск инициализации (только для MMC)
+;sdSendCmd_A_CS		выдача команды в порт c выставлением сигнала CS
+;sdSendCmd_A		выдача команды в порт
+;sdSendCmd_16		выдача команды #10 в порт (задание размера блока)
+;sdSendCmd_08		выдача команды #08 в порт (узнать какое напряжение нужно карте)
+;sdSendCmd_00		выдача команды #00 в порт (программный сброс карты)
+;sdSendCmd_HL		выдача команды в порт
+;sdWaitCmdResp		ожидание cmd. Resp. (в течении 80 тактирований)
+;sdWaitDR		ожидание Data Response
+;sdSendEndToken		выдача токена конца много-секторной операции
+;sdWait128tact		пауза в 128 тактирований
+;sdWaitNoBusy		ожидание снятия BUSY
+;sdWaitDO		ожидание DO
+;sdOffSD		выключение питание карты
+;sdFakeRead		холостая загрузка заданного количества байтов из SPI
+;sdCSlow		выставление CS в 0
+;sdCShigh		выставление CS в 1
+;sdWait			ожидание пустой шины
+;
+;------------------------------------------------------------------------------
+sdWriteSecs_HL	ifused
+;запись блока секторов
+;вх:  hl - адрес буфера для записи секторов
+;вых: cy=1 ошибки SD карты -> a - код ошибки
+;       a=#77 SD card error R/W
+;       a=#78 SD card read only
+;
+;sdWriteSecs_HL
+;
+;проверка защиты записи
+	ld	a,(ExtFlags)
+	bit	5,a
+	jr	nz,goto059		;игнорировать read only
+	ld	bc,(kPortCONF)
+	in	a,(c)
+	and	#02
+	scf
+	ld	a,#78			;SD card read only
+	ret	nz			;запись запрещена
+
+;запись сектора/секторов
+goto059	push	hl
+	ld	hl,(AdrLBA32+0)		;адрес сектора
+	ld	de,(AdrLBA32+2)
+	ld	a,(secCounter)		;количество секторов
+	ld	b,a
+	dec	a
+	jr	nz,goto057		;многосекторное чтение
+
+;односекторная запись
+	call	sdSendCmd_24
+	ld	a,#FE			;токен начала блока данных
+	jr	goto058
+
+;многосекторная запись
+goto057	call	sdSendCmd_25		;даем команду на многосекторную запись
+	ld	a,#FC			;токен начала блока данных
+goto058	pop	hl
+	jr	c,goto054		;ошибка SD карты
+	call	sdWait			;ожидаем готовности к приему данных
+	jr	c,goto054		;не вышли в готовность
+	push	hl
+loop046	push	af
+	call	sdWriteData512		;передача блока данных, с токеном начала + 512 байт данных и 2 байт crc
+	inc	h
+	inc	h
+	pop	af
+	call	sdWaitDR		;ожидание Data Resp. и снятия busy
+	jr	c,goto056		;не вышли в готовность
+	djnz	loop046
+	pop	hl
+	cp	#FC
+	jp	z,sdSendEndToken
+	jp	sdCShigh
+
+	endif
+
+;------------------------------------------------------------------------------
+sdReadSecs_HL	ifused
+;загрузка блока секторов
+;вх:  hl - адрес буфера для чтения секторов
+;вых: cy=1 ошибки SD карты -> a - код ошибки
+;       a=#77 SD card error R/W
+;
+;sdReadSecs_HL
+;
+	push	hl
+	ld	hl,(AdrLBA32+0)		;адрес сектора
+	ld	de,(AdrLBA32+2)
+	ld	a,(secCounter)		;количество секторов
+	ld	b,a
+	dec	a
+	jr	nz,goto053		;многосекторное чтение
+
+;односекторное чтение
+	call	sdSendCmd_17
+	pop	hl
+	jr	c,goto054		;ошибка SD карты
+;  чтение сектора
+	push	hl
+loop044	call	sdWaitDO		;ожидаем токен начала данных (#FE)
+	jr	nz,loop044
+	call	sdReadData512		;принимаем 512б данных и пропускаем crc
+	djnz	loop044
+	jr	goto055
+
+;многосекторное чтение
+goto053	call	sdSendCmd_18		;запуск многосекторного чтения
+	pop	hl
+	jr	c,goto054		;ошибка SD карты
+;  чтение секторов
+	push	hl
+loop045	call	sdWaitDO		;ожидаем токен начала данных (#FE)
+	jr	nz,loop045
+	call	sdReadData512		;принимаем 512б данных и пропускаем crc
+	inc	h
+	inc	h
+	djnz	loop045
+;  завершение чтения
+	call	sdSendCmd_12
+	call	sdWait128tact
+	call	sdWaitNoBusy
+goto055	or	a
+goto056	pop	hl
+goto054	ld	a,#77			;SD card error R/W
+	jp	sdCShigh
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWriteDataSB512	ifused
+;одноблоковая запись 512b данных из буфера
+;вх:  hl - адрес буфера для записи данных
+;вых: bc=kPortDATA
+;     a=#00
+;     cy=0
+;
+;sdWriteDataSB512
+;
+	ld	a,#FE			;токен начала блока данных
+	jr	goto052
+	jr	sdWriteData512
+	org	$-2
+
+	endif	
+
+;------------------------------------------------------------------------------
+sdWriteDataMB512	ifused
+;многоблоковая запись 512b данных из буфера
+;вх:  hl - адрес буфера для записи данных
+;вых: a=#00
+;     cy=0
+;
+;sdWriteDataMB512
+;
+	ld	a,#FC			;токен начала блока данных
+	jr	sdWriteData512
+	org	$-2
+	endif
+
+sdWriteData512	ifused
+;
+goto052	push	hl
+	push	bc
+	ld	bc,(kPortDATA)
+	out	(c),a
+	ld	a,#20
+loop043	DUP	#10
+	outi
+	inc	b
+	EDUP
+	dec	a
+	jp	nz,loop043
+	dec	a			;a=#FF
+	out	(c),a			;посылаем 2 байта crc (любой)
+	out	(c),a
+	pop	bc
+	pop	hl
+	xor	a
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdReadData512	ifused
+;чтение 512b данных в буфер
+;вх:  hl - адрес буфера для чтения данных
+;вых: a=#00
+;
+;sdReadData512
+;
+	push	hl
+	push	bc
+	ld	bc,(kPortDATA)
+	ld	a,#20
+loop042	DUP	#10
+	ini
+	inc	b
+	EDUP
+	dec	a
+	jp	nz,loop042
+	in	a,(c)			;выгребаем 2 байта crc
+	nop
+	nop
+	in	a,(c)
+	pop	bc
+	pop	hl
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdCalcCapacity	ifused
+;расчет объема карты в блоках
+;вх:  hl - адрес считанного CSD
+;     iy - адрес начала блока переменных SD карты
+;вых: dehl - размер карты в блоках
+;     bc,a - ???
+;
+;sdCalcCapacity
+;
+	ld	a,(hl)
+	ld	bc,#0005
+	add	hl,bc
+	and	#C0
+	cp	#40
+	jr	z,goto049		;CSD version 2.0
+
+;CSD version 1.0
+	ld	a,(hl)
+	and	#0F
+	ld	c,a			;c - READ_BL_LEN
+	ld	b,#02
+	inc	hl
+loop039	inc	hl
+	inc	hl			;hl +8
+	rl	(hl)
+	dec	hl
+	rl	(hl)
+	dec	hl
+	rl	(hl)
+	djnz	loop039
+	ld	a,(hl)			;hl +6
+	and	#0F
+	ld	d,a
+	inc	hl
+	ld	e,(hl)			;de - C_SIZE
+	inc	hl
+	inc	hl
+	inc	hl
+	rl	(hl)
+	dec	hl
+	rl	(hl)
+	ld	a,(hl)
+	and	#07			;a - C_SIZE_MULT
+;  dehl = BLOCKNR = (C_SIZE+1) * 2^(C_SIZE_MULT+2)
+	inc	a
+	inc	a
+	ld	b,a			;C_SIZE_MULT+2
+	inc	de
+	ex	de,hl
+	xor	a
+	ld	d,a
+	ld	e,a
+loop040	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+	djnz	loop040
+;  adehl = (C_SIZE+1) * 2^(C_SIZE_MULT+2) * 2^READ_BL_LEN
+	ld	b,c
+	xor	a
+loop041	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+	adc	a,a
+	djnz	loop041
+;  adehl/#200 - количество блоков(секторов)
+	rra
+	rr	d
+	rr	e
+	rr	h
+	ld	l,h
+	ld	h,e
+	ld	e,d
+	ld	d,a
+	jr	goto050			;запишем в переменную
+
+;CSD version 2.0
+goto049	inc	hl
+	inc	hl			;+7
+	ld	d,(hl)
+	inc	hl
+	ld	e,(hl)
+	inc	hl
+	ld	h,(hl)
+	ld	l,b
+	inc	h
+	jr	nz,goto051
+	inc	de
+goto051	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+
+;запишем в переменную
+	IFDEF	ver1_10			;для версии v1.10
+goto050	 ;ld	(sdLBAsec+#00),hl
+	 ;ld	(sdLBAsec+#02),de
+	 ld	(iy+#06),l
+	 ld	(iy+#07),h
+	 ld	(iy+#08),e
+	 ld	(iy+#09),d
+	ELSE				;для версии v1.00
+goto050	 ld	(sdLBAsec+#00),hl
+	 ld	(sdLBAsec+#02),de
+	ENDIF
+
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdReadCSD	ifused
+;чтение регистра CSD
+;вх:  hl - адрес буфера для чтения
+;вых: cy=1 ошибка карты
+;       a=#77 - SD card error R/W
+;     cy=0 прочитано успешно
+;       a=#00
+;       hl=hl+#10
+;
+;sdReadCSD
+;
+	call	sdSendCmd_09
+	jr	goto048
+	jr	sdReadCID
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdReadCID	ifused
+;чтение регистра CID
+;вх:  hl - адрес буфера для чтения
+;вых: cy=1 ошибка карты
+;       a=#77 - SD card error R/W
+;     cy=0 прочитано успешно
+;       a=#00
+;       hl=hl+#10
+;
+;sdReadCID
+;
+	call	sdSendCmd_10
+goto048	ld	a,#77			;SD card error R/W
+	ret	c			;ошибка карты
+loop037	call	sdWaitDO		;ожидаем токен начала данных #FE
+	jr	nz,loop037
+	ld	bc,(kPortDATA)
+	ld	a,#10
+loop038	ini
+	dec	a
+	jr	nz,loop038
+	xor	a
+	ret	
+
+	endif
+
+;------------------------------------------------------------------------------
+sdTestInit	ifused
+;определение наличия и инициализация SDC/MMC карты
+;вх:  iy - адрес начала блока переменных SD карты
+;вых: cy=1 карта не найдена
+;     cy=0 карта обнаружена
+;       a=#00
+;       hl,de,bc - ????
+;
+;sdTestInit
+;
+	IFDEF	ver1_10			;для версии v1.10
+;	 ld	hl,devFlags		;сбросим настройки карты
+;	 ld	(hl),%01001000
+	 ld	(iy+#0A),%01001000
+	ELSE				;для версии v1.00
+	 ld	hl,sdFlags		;сбросим настройки карты
+	 ld	(hl),%01001000
+	ENDIF
+	call	sdCShigh
+	ld	de,512+10
+	call	sdFakeRead		;холостая загрузка 512+10 байт на всякий случай
+
+;1000 циклов ожидания
+	ld	de,1000
+loop033	dec	de
+	ld	a,d
+	or	e
+	jp	z,goto043		;карта не найдена
+	call	sdSendCmd_00		;команда на инициализацию карты
+	jr	c,loop033		;висим в цикле, пока не будет получен cmd. Resp. (в отведенные 80 тактирований)
+	dec	a
+	jr	nz,loop033		;висим в цикле, пока не получим ответ без ошибок и с выставленным Idle State флагом (bit 0)
+;  если все прошло успешно, то карта переключается в SPI режим
+	call	sdSendCmd_08		;запрос на поддерживаемое напряжение питания (только для SDCv2)
+	push	af
+	in	h,(c)
+	nop
+	in	h,(c)
+	nop
+	in	h,(c)
+	nop
+	in	l,(c)
+	pop	af
+	jr	c,loop033		;cmd. Resp. получен?
+	bit	2,a
+	jr	z,goto044		;если нет ошибки Illegal command (бит 2), то перед нами SDCv2
+
+;cmd08 не поддерживается, перед нами либо SDCv1, либо MMC
+	ld	de,8000			;8к циклов ожидания
+loop034	dec	de
+	ld	a,d
+	or	e
+	jr	z,goto045		;если время вышло, пробуем определить карту как MMC
+	ld	h,#00			;HCS в 0
+	call	sdSendAcmd_41		;команда на инициализацию SDC
+	jr	c,loop034		;ждем cmd. Resp.
+	cp	#01
+	jr	z,loop034		;ждем выхода из Idle State
+	or	a			;если есть какая-либо ошибка, то пробуем определить карту как MMC
+	jr	z,goto046		;SDv1 Detected
+
+;пробуем определить карту как MMC
+goto045	ld	de,8000
+loop035	dec	de
+	ld	a,d
+	or	e
+	jr	z,goto043		;карты нету, либо неизвестный тип
+	call	sdSendCmd_01		;команда на инициализацию MMC
+	jr	c,loop035		;ждем cmd. Resp.
+	cp	#01
+	jr	z,loop035		;ждем выхода из Idle State
+	or	a
+	jr	nz,goto043		;карта не опознана
+	jr	goto046			;MMC Ver.3 Detected
+
+;пробуем определить карту как SDCv2
+goto044	ld	de,#01AA
+	or	a
+	sbc	hl,de
+	jr	nz,goto043		;карта не опознана
+	ld	de,8000
+loop036	dec	de
+	ld	a,d
+	or	e
+	jr	z,goto043		;карта не найдена
+	ld	h,#40			;HCS в 1
+	call	sdSendAcmd_41		;команда на инициализацию SDC
+	jr	c,loop036		;ждем cmd. Resp.
+	cp	#01
+	jr	z,loop036		;ждем выхода из Idle State
+	or	a
+	jr	nz,goto043		;карта не опознана
+;  SDv2 Detected
+	call	sdSendCmd_58		;определяем тип адресации (блоковая либо байтовая)
+	jr	c,goto043		;карта не опознана
+	ld	bc,(kPortDATA)
+	in	a,(c)
+	nop
+	in	l,(c)
+	nop
+	in	l,(c)
+	nop
+	in	l,(c)
+	bit	6,a
+	jr	z,goto046		;SDv2 байтовая адресация
+;  SDv2 блоковая адресация
+	IFDEF	ver1_10			;для версии v1.10
+;	 ld	hl,devFlags
+;	 set	2,(hl)			;блоковая адресация
+	 set	2,(iy+#0A)		;блоковая адресация
+	ELSE				;для версии v1.00
+	 ld	hl,sdFlags
+	 set	4,(hl)			;блоковая адресация
+	ENDIF
+
+;карта успешно опознана
+	IFDEF	ver1_10			;для версии v1.10
+goto047	 set	7,(iy+#0A)		;карта найдена
+;	 ld	hl,devFlags
+;	 set	7,(hl)			;карта найдена
+	ELSE				;для версии v1.00
+goto047	 ld	hl,sdFlags
+	 set	7,(hl)			;карта найдена
+	ENDIF
+	xor	a
+	jp	sdCShigh
+
+;выставляем размер блока в 512байт, т. к. карта использует байтовую адресацию
+goto046	call	sdSendCmd_16
+	jr	c,goto043		;если не получен cmd. Resp., то считаем, что карты нету
+	or	a
+	jr	z,goto047
+
+;карта не опознана, вылетаем с ошибкой
+goto043	scf
+	jp	sdCShigh
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendAcmd_41	ifused
+;запуск инициализации (только для SDC)
+;вх:  h - параметр команды
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendAcmd_41
+;
+	call	sdSendCmd_55
+	call	sdCShigh
+	call	sdCSlow
+	ld	bc,(kPortDATA)
+	in	(c)
+	in	(c)
+	ld	a,sdCmd41
+	out	(c),a
+	ld	l,#00
+	out	(c),h
+	nop
+	out	(c),l
+	nop
+	out	(c),l
+	nop
+	out	(c),l
+	dec	l	
+	out	(c),l
+	jp	sdWaitCmdResp
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_24	ifused
+;запуск односекторной записи
+;вх:  dehl - номер сектора
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_24
+;
+	ld	a,sdCmd24
+	jr	goto025
+	jr	sdSendCmd_18
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_25	ifused
+;запуск много-секторной записи (завершение производится по стоп токену!)
+;вх:  dehl - номер сектора
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_25
+;
+	ld	a,sdCmd25
+	jr	goto025
+	jr	sdSendCmd_18
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_17	ifused
+;запуск односекторного чтения
+;вх:  dehl - номер сектора
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_17
+;
+	ld	a,sdCmd17
+	jr	goto025
+	jr	sdSendCmd_18
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_18	ifused
+;запуск много-секторного чтения (завершение производится по cmd12)
+;вх:  dehl - номер сектора
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_18
+;
+	ld	a,sdCmd18
+goto025	call	sdCShigh
+	call	sdCSlow
+	push	hl
+	push	de
+	push	bc
+	ld	c,a
+	IFDEF	ver1_10			;для версии v1.10
+	 ld	a,(devFlags)		;тип адресации
+	 bit	2,a
+	ELSE				;для версии v1.00
+	 ld	a,(sdFlags)		;тип адресации
+	 bit	4,a
+	ENDIF
+	jr	nz,goto026		;блоковая
+	add	hl,hl
+	ex	de,hl
+	adc	hl,hl
+	ex	de,hl
+	ld	d,e
+	ld	e,h
+	ld	h,l
+	ld	l,#00
+goto026	ld	a,c
+	ld	bc,(kPortDATA)
+	in	(c)
+	in	(c)
+	out	(c),a
+	nop
+	out	(c),d
+	nop
+	out	(c),e
+	nop
+	out	(c),h
+	nop
+	out	(c),l
+	ld	a,#FF
+	out	(c),a
+	pop	bc
+	pop	de
+	pop	hl
+	jr	sdWaitCmdResp
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_12	ifused
+;завершение передачи данных (вызывается при завершении много-секторного чтения)
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_12
+;
+	ld	a,sdCmd12
+	call	sdSendCmd_A
+	push	bc
+	ld	bc,(kPortDATA)
+	in	a,(c)
+	pop	bc
+	jr	sdWaitCmdResp
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_10	ifused
+;чтение CID
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_10
+;
+	ld	a,sdCmd10
+	jr	goto042
+	jr	sdSendCmd_01
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_09	ifused
+;чтение CSD
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_09
+;
+	ld	a,sdCmd09
+	jr	goto042
+	jr	sdSendCmd_01
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_58	ifused
+;чтение OCR
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_58
+;
+	ld	a,sdCmd58
+	jr	goto042
+	jr	sdSendCmd_01
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_55	ifused
+;вызывается перед ACMD<n>
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_55
+;
+	ld	a,sdCmd55
+	jr	goto042
+	jr	sdSendCmd_01
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_01	ifused
+;запуск инициализации (только для MMC)
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_01
+;
+	ld	a,sdCmd01
+goto042	call	sdSendCmd_A_CS
+	jr	sdWaitCmdResp
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_A_CS	ifused
+;выдача команды в порт c выставлением сигнала CS
+;вх:  a - код команды
+;вых: a=#FF
+;
+;sdSendCmd_A_CS
+;
+	call	sdCShigh
+	call	sdCSlow
+	jr	sdSendCmd_A
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_A	ifused
+;выдача команды в порт
+;  команда вида #nn #00 #00 #00 #00 #FF
+;вх:  a - код команды
+;вых: a=#FF
+;
+;sdSendCmd_A
+;
+	push	bc
+	ld	bc,(kPortDATA)
+	in	(c)
+	in	(c)
+	out	(c),a
+	xor	a
+	out	(c),a
+	nop
+	out	(c),a
+	nop
+	out	(c),a
+	nop
+	out	(c),a
+	dec	a
+	out	(c),a
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_16	ifused
+;выдача команды #10 в порт (задание размера блока) должно быть всегда 512б
+;вх:  ---
+;вых: bc - порт DATA
+;     a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;     hl - ???
+;
+;sdSendCmd_16
+;
+	ld	hl,sdCmd16
+	jr	sdSendCmd_HL
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_08	ifused
+;выдача команды #08 в порт (узнать какое напряжение нужно карте)
+;  только для SDCv2
+;вх:  ---
+;вых: bc - порт DATA
+;     a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;     hl - ???
+;
+;sdSendCmd_08
+;
+	ld	hl,sdCmd08
+	jr	sdSendCmd_HL
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_00	ifused
+;выдача команды #00 в порт (программный сброс карты)
+;вх:  ---
+;вых: bc - порт DATA
+;     a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;     hl - ???
+;
+;sdSendCmd_00
+;
+	ld	hl,sdCmd00
+	jr	sdSendCmd_HL
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendCmd_HL	ifused
+;выдача команды в порт
+;вх:  hl - адрес начала команды
+;вых: bc - порт DATA
+;     a - состояние порта DATA
+;     hl=hl+6
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdSendCmd_HL
+;
+	call	sdCShigh
+	call	sdCSlow
+	ld	bc,(kPortDATA)
+	in	(c)
+	in	(c)
+	outi
+	nop
+	outi
+	nop
+	outi
+	nop
+	outi
+	nop
+	outi
+	nop
+	outi
+	jr	sdWaitCmdResp
+	org	$-2
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWaitCmdResp	ifused
+;ожидание cmd. Resp. (в течении 80 тактирований)
+;вх:  ---
+;вых: a - состояние порта DATA
+;     cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdWaitCmdResp
+;
+	push	de
+	push	bc
+	ld	bc,(kPortDATA)
+	ld	d,10
+loop023	in	a,(c)
+	or	a			;nc
+	jp	p,goto024		;7,a=0
+	dec	d
+	jr	nz,loop023
+	scf
+goto024	pop	bc
+	pop	de
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWaitDR	ifused
+;ожидание Data Response
+;вх:  ---
+;вых: cy=0 - ошибок не было
+;       =1 - ошибка SD карты
+;
+;sdWaitDR
+;
+	push	af
+	call	sdWaitDO
+	and	#1F
+	cp	#05
+	jr	nz,goto023		;если Data Resp. принят без ошибок, то идем дальше (%0XXX1, xxx - биты статуса [%010 - данные приняты])
+	call	sdWaitNoBusy		;ждем пока пройдет busy
+	pop	af
+	or	a
+	ret
+goto023	call	sdSendEndToken		;даем стоп токен
+;	call	sdOffSD			;вырубаем питание карты
+	pop	af
+	scf
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdSendEndToken	ifused
+;выдача токена конца много-секторной операции
+;вх:  ---
+;вых: bc - порт DATA
+;     a=#FD
+;
+;sdSendEndToken
+;
+	ld	bc,(kPortDATA)
+	ld	a,#FD			;токен конца много-секторной операции
+	out	(c),a
+	call	sdWait128tact
+	call	sdWaitNoBusy
+	jr	sdCShigh
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWait128tact	ifused
+;пауза в 128 тактирований
+;вх:  ---
+;вых: регистры не меняются
+;
+;sdWait128tact
+;
+	push	bc
+	push	af
+	ld	a,#10
+loop022	ld	bc,(kPortDATA)
+	in	c,(c)
+	dec	a
+	jr	nz,loop022
+	pop	af
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWaitNoBusy	ifused
+;ожидание снятия BUSY
+;вх:  ---
+;вых: регистры не меняются
+;
+;sdWaitNoBusy
+;
+	push	bc
+	push	af
+	ld	bc,(kPortDATA)
+loop021	in	a,(c)
+	or	a
+	jr	z,loop021
+	pop	af
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWaitDO	ifused
+;ожидание DO
+;вх:  ---
+;вых: a - состояние порта DATA
+;     z -> a=#FE
+;
+;sdWaitDO
+;
+	push	bc
+	ld	bc,(kPortDATA)
+loop020	in	a,(c)
+	cp	#FF
+	jr	z,loop020
+	pop	bc
+	cp	#FE
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdOffSD		ifused
+;выключение питание карты
+;вх:  ---
+;вых: a=#00
+;
+;sdOffSD
+;
+	push	bc
+	xor	a
+	ld	bc,(kPortCONF)
+	out	(c),a
+	ld	bc,(kPortDATA)
+	out	(c),a
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdFakeRead	ifused
+;холостая загрузка заданного количества байтов из SPI
+;вх:  de - количество байт
+;вых: bc - порт DATA
+;     de=#0000
+;     a=#00
+;
+;sdFakeRead
+;
+	ld	bc,(kPortDATA)
+loop019	ld	a,#FF
+	out	(c),a
+	dec	de
+	ld	a,d
+	or	e
+	jr	nz,loop019
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdCSlow		ifused
+;выставление CS в 0
+;вх:  ---
+;вых: регистры не меняются
+;
+;sdCSlow
+;
+	push	bc
+	push	af
+
+	ld	bc,(kPortCONF)
+	ld	a,(kPortCSlow)		;%00000001
+	out	(c),a
+	ld	bc,(kPortDATA)
+	ld	a,#FF
+	out	(c),a
+
+	pop	af
+	pop	bc
+;	jr	sdWait
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdCShigh	ifused
+;выставление CS в 1
+;вх:  ---
+;вых: регистры не меняются
+;
+;sdCShigh
+;
+	push	bc
+	push	af
+
+	ld	bc,(kPortCONF)
+	ld	a,(kPortCSHigh)		;%00000011
+	out	(c),a
+	ld	bc,(kPortDATA)
+	ld	a,#FF
+	out	(c),a
+
+	pop	af
+	pop	bc
+	ret
+
+	endif
+
+;------------------------------------------------------------------------------
+sdWait		ifused
+;ожидание пустой шины
+;вх:  ---
+;вых: регистры не меняются
+;
+;sdWait
+;
+	push	de
+	push	bc
+	push	af
+	ld	de,#1000
+	ld	bc,(kPortDATA)
+loop018	in	a,(c)
+	cp	#FF
+	jr	z,goto041
+	dec	de
+	ld	a,d
+	or	e
+	jr	nz,loop018
+	scf
+goto041	pop	bc
+	ld	a,b
+	pop	bc
+	pop	de
+	ret
+
+	endif
+
+;==============================================================================
+	IFDEF	SDcard
+;команды
+sdCmd01	equ #40+#01				;инициализация
+sdCmd09	equ #40+#09				;чтение CSD
+sdCmd10	equ #40+#0A				;чтение CID
+sdCmd12	equ #40+#0C				;остановка передачи
+sdCmd17	equ #40+#11				;односекторное чтение
+sdCmd18	equ #40+#12				;многосекторное чтение
+sdCmd24	equ #40+#18				;односекторная запись
+sdCmd25	equ #40+#19				;многосекторная запись
+sdCmd41	equ #40+#29				;инициализация (только SDC)
+sdCmd55	equ #40+#37				;команда префикс к ACMD
+sdCmd58	equ #40+#3A				;чтение OCR
+sdCmd00	db  %01000000+#00,#00,#00,#00,#00,#95	;программный сброс
+sdCmd08	db  %01000000+#08,#00,#00,#01,#AA,#87	;напряжение карты (только для SDCv2)
+sdCmd16	db  %01000000+#10,#00,#00,#02,#00,#FF	;задание размера блока (512б)
+	ENDIF
+;==============================================================================

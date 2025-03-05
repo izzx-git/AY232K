@@ -1,0 +1,115 @@
+Пример как включить только SMUC и SZ
+Надо поправить в нескольких файлах.
+Также в одном из файлов меняется тип прерывания, надо проверить.
+
+Файл DrvHDD.var1_10.a80 ---------------
+
+;таблица адресов блоков переменных винчестеров/SD карт
+tblDev	dw	msSMUC
+	dw	slSMUC
+	dw	msSMUC
+	dw	slSMUC
+	;dw	msNemo
+	;dw	slNemo
+	;dw	msNemo
+	;dw	slNemo
+	;dw	msATM
+	;dw	slATM
+	;dw	msPROFI
+	;dw	slPROFI
+	dw	cardZC
+	dw	cardZC
+	;dw	mDivMMC
+	;dw	sDivMMC
+
+
+Файл DrvHDD.main.a80 ------------------------------
+
+;условия трансляции 
+
+	DEFINE	ver1_10		;сборка версии 1.10
+;	DEFINE	ver1_00		;сборка версии 1.00
+	DEFINE	DrvHddExtVars	;переменные хранятся вне драйвера
+	DEFINE	AllDevice	;использовать все контроллеры
+	DEFINE	SMUCv2		;поддержка SMUC v2
+	DEFINE	SMUCv1		;поддержка SMUC v1 (через теневые порты)
+;	DEFINE	NemoStd		;поддержка NEMO
+;	DEFINE	NemoA8		;поддержка NEMO A8
+;	DEFINE	ATMide		;поддержка ATM-IDE
+;	DEFINE	PROFIide	;поддержка PROFI-IDE
+	DEFINE	ZC		;поддержка Z-Controller
+;	DEFINE	DivMMC		;поддержка DivMMC
+	DEFINE	MultiRW		;чтение групп секторов
+	DEFINE	LBA32		;поддержка LBA32 адресации
+	DEFINE	offCACHE	;отключать кэш
+;	DEFINE	scrATM80x25	;текстовый экран ATM
+	DEFINE	scrATMstd	;стандартный экран ATM
+;	DEFINE	onlyRead	;только чтение
+;	DEFINE	noTestTrDos	;не проверять наличие в Tr-Dos процедур чтения/записи в порты для SMUC
+;	DEFINE	openDOS		;теневые порты открыты
+;	DEFINE	forGMXloader	;для загрузчика GMX
+
+
+
+;если задано условие DrvHddExtVars
+  IFDEF  DrvHddExtVars
+msSMUC  equ  _msSMUC  ;SMUC master
+slSMUC  equ  _slSMUC  ;SMUC slave
+;msNemo  equ  _msNemo  ;Nemo master
+;slNemo  equ  _slNemo  ;Nemo slave
+;msATM  equ  _msATM  ;ATM IDE master
+;slATM  equ  _slATM  ;ATM IDE slave
+;msPROFI  equ  _msPROFI;PROFI IDE master
+;slPROFI  equ  _msPROFI;PROFI IDE slave
+cardZC  equ  _cardZC  ;ZC SD карта
+;mDivMMC  equ  _mDivMMC;DivMMC master
+;sDivMMC  equ  _sDivMMC;DivMMC slave
+  ENDIF
+
+
+Файл init.a80 ---------------------------
+
+;таблица с номерами устройств
+;                        ccchpp
+tablDev
+;	IFDEF	SMUCv2
+	 dw _msSMUC:  db %00000000	;SMUC v2 master
+;	ENDIF
+;	IFDEF	SMUCv1
+	 dw _msSMUC:  db %00001000	;SMUC v1 master
+;	ENDIF
+	IFDEF	NemoStd
+	 dw _msNemo:  db %00010000	;Nemo master
+	ENDIF
+	IFDEF	NemoA8
+	 dw _msNemo:  db %00011000	;Nemo A8 master
+	ENDIF
+	IFDEF	ATMide
+	 dw _msATM:   db %00100000	;ATM ide master
+	ENDIF
+	IFDEF	PROFIide
+	 dw _msPROFI: db %00101000	;ATM ide master
+	ENDIF
+;	IFDEF	ZC
+	 dw _cardZC:  db %00110000	;SD ZC
+;	ENDIF
+	IFDEF	DivMMC
+	 dw _mDivMMC: db %00111000	;SD DivMMC master
+	ENDIF
+
+
+Основной файл:
+
+_msSMUC	  ds	11		;SMUC master
+_slSMUC	  ds	11		;SMUC slave
+;_msNemo	  ds	11		;Nemo master
+;_slNemo	  ds	11		;Nemo slave
+;_msATM	  ds	11		;ATM IDE master
+;_slATM	  ds	11		;ATM IDE slave
+;_msPROFI	  ds	11		;Profi IDE master
+;_slPROFI	  ds	11		;Profi IDE slave
+_cardZC	  ds	11		;ZC SD Є ав 
+;_mDivMMC	  ds	11		;DivMMC master
+;_sDivMMC	  ds	11		;DivMMC slave
+
+

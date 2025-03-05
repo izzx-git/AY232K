@@ -1,0 +1,6 @@
+;goto069
+;loop050
+;cng  2
+;var  3
+;proc 0
+
