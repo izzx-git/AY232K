@@ -3,7 +3,7 @@
 ; Make init shorter and readable:-)
     macro outp port, value
 	ld b, port
-	ld c, #ee
+	ld c, #EF
     ld a, value
     out (c), a
     endm
@@ -30,12 +30,12 @@ init:
     outp MCR,     #2f // Enable AFE
     ret
 	
-retry_rec_count_max equ 10 ;ждать данных максимум столько прерываний
+retry_rec_count_max equ 20 ;ждать данных максимум столько прерываний
     
 ; Flag C <- Data available
 ; isAvailable:
     ; ld a, LSR
-    ; in a, (#ee)
+    ; in a, (#EF)
     ; rrca
     ; ret
 
@@ -44,11 +44,11 @@ retry_rec_count_max equ 10 ;ждать данных максимум столь�
 ; A <- byte
 ; read1:
     ; ld a, LSR
-    ; in a, (#ee)
+    ; in a, (#EF)
     ; rrca
     ; ret nc
     ; ld a, RBR_THR	
-    ; in a, (#ee)
+    ; in a, (#EF)
     ; scf 
     ; ret
 
@@ -60,11 +60,11 @@ read:
 	ld (#5C78),a ;обнулить счётчик ожидания ;13
 .wait
     ld a, LSR
-    in a, (#ee)
+    in a, (#EF)
     rrca
 	jr nc, .readW
     ld a, RBR_THR	
-    in a, (#ee)
+    in a, (#EF)
 	ret	
 .readW	
 	ld a,(#5C78)
@@ -80,11 +80,11 @@ read:
 ; A <- Byte
 ; readB:
     ; ld a, LSR
-    ; in a, (#ee)
+    ; in a, (#EF)
     ; rrca
     ; jr nc, readB
 	; ld a, RBR_THR
-    ; in a, (#ee)
+    ; in a, (#EF)
     ; ret
 
 ; A -> byte to send
@@ -92,12 +92,12 @@ write:
     push af
 .wait
 	ld a, LSR
-    in a, (#ee)
+    in a, (#EF)
     and #20
     jr z, .wait
     pop af
 	ld b, RBR_THR
-	ld c, #ee	
+	ld c, #EF	
     out (c), a
     ret
 
