@@ -3102,7 +3102,7 @@ print_progress ;печать текущего прогресса
 			ld bc,5
 			ldir
 			ld hl,mes_progress 
-			call print_sys	
+			call print	
 			ret
 	
 print_progress_tot ;печать общего прогресса
@@ -3112,7 +3112,7 @@ print_progress_tot ;печать общего прогресса
 			ld bc,5
 			ldir
 			ld hl,mes_progress_tot 
-			call print_sys	
+			call print
 			ret
 
 
