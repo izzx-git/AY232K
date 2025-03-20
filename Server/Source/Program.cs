@@ -1,91 +1,75 @@
-﻿using System;
+﻿//Сервер Tcp для ZX AY232K
+using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using System.IO;
 using System.Runtime.InteropServices;
-//Сервер UDP для ZX AY232K
-namespace ZXNServerK
+
+public class SimpleServer
 {
-    class Program
-    {
-        static string ver = "2024 02 29"; //версия сервера
         //static string remoteAddress; // хост для отправки данных
         //static int remotePort; // порт для отправки данных
         static byte type_pack; //Тип ответного пакета
-        static int localPort; // локальный порт для прослушивания входящих подключений
         static int pack_size_com; //размер основной части пакета
         static int pack_size_full; //полный размер пакета 
         static int pack_size1024 = 1024 + 32 + 2; //Размер пакета 1024
         static int pack_size256 = 256 + 32 + 2; //Размер пакета 256
         static int pack_size32 = 32 + 2; //Размер пакета 32
         static int files_pag = 64; //Файлов в одной странице каталога
-        static int max_file_size = 256*256*256; //макс размер файла
+        static int max_file_size = 256*256*1024; //макс размер файла
+        static int buf_size = 2000; //размер буфера
 
-        static void Main(string[] args)
+    private TcpListener listener;
+    private List<TcpClient> clients = new List<TcpClient>(); // Отслеживаются подключенные клиенты
+
+    public void Start(int port) //запуск сервера
+    {
+        listener = new TcpListener(IPAddress.Any, port);
+        listener.Start();
+        Console.WriteLine("Server started, waiting for connections...");
+
+        Thread acceptThread = new Thread(AcceptClients);
+        acceptThread.Start();
+    }
+
+    private void AcceptClients() //приём клиента
+    {
+        while (true)
         {
             try
             {
-                ////test
-                if (args.Length == 0) // если не передан параметр
-                    localPort = 8888; //порт будет такой
-                else
-                    localPort = Int32.Parse(args[0]); //или получим номер порта как параметр
-                //Int32.Parse(Console.ReadLine());
-                Console.Write("ZXNServerK v." + ver + "\n");
-                Console.Write("Порт для прослушивания: " + localPort + "\n"); // локальный порт
+                TcpClient client = listener.AcceptTcpClient();
+                clients.Add(client);
+                Console.WriteLine("Client connected.");
 
-                //Console.Write("Введите удаленный адрес для подключения: ");
-                //remoteAddress = Console.ReadLine(); // адрес, к которому мы подключаемся
-                //Console.Write("Введите порт для подключения: ");
-                //remotePort = Int32.Parse(Console.ReadLine()); // порт, к которому мы подключаемся
-                Thread receiveThread = new Thread(new ThreadStart(ReceiveMessage)); //запуск основного кода
-                receiveThread.Start();
-                //SendMessage(); // отправляем сообщение
-
-
+                Thread clientThread = new Thread(() => HandleClient(client));
+                clientThread.Start();
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex.Message);
+                Console.WriteLine("Error accepting client: " + ex.Message);
             }
         }
-        //private static void SendMessage()
-        //{
-        //    UdpClient sender = new UdpClient(); // создаем UdpClient для отправки сообщений
-        //    try
-        //    {
-        //        while (true)
-        //        {
-        //            //string message = Console.ReadLine(); // сообщение для отправки
-        //            //byte[] data = Encoding.Unicode.GetBytes(message);
-        //            //sender.Send(data, data.Length, remoteAddress, remotePort); // отправка
-        //        }
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        Console.WriteLine(ex.Message);
-        //    }
-        //    finally
-        //    {
-        //        sender.Close();
-        //    }
-        //}
+    }
 
-        private static void ReceiveMessage()
+    private void HandleClient(TcpClient client) //обработка клиента
+    {
+        NetworkStream stream = client.GetStream();
+        byte[] data = new byte[buf_size];
+        int bytesRead;
+
+        try
         {
-            UdpClient receiver = new UdpClient(localPort); // UdpClient для получения данных
-            IPEndPoint remoteIp = null; // адрес входящего подключения
-            try
-            {
-                while (true)
-                {
-                    byte[] data = receiver.Receive(ref remoteIp); // получаем данные
-                    //string message = Encoding.Unicode.GetString(data);
-                    Console.WriteLine("Подключен клиент: " + remoteIp.ToString());
+            while ((bytesRead = stream.Read(data, 0, data.Length)) > 0)
+            { //тут основной код обработки запроса
+                
+                    IPEndPoint ep = client.Client.RemoteEndPoint as IPEndPoint; //узнать адрес
+        
+                    Console.WriteLine("Client: " + ep.Address.ToString());
 
-                    if (data.Length >= 32) //если размер пакета подходящий
+                    if (bytesRead >= pack_size32 && bytesRead <=(pack_size1024)) //если размер пакета подходящий
                     {
                         //Thread.Sleep(5);
                         //Проверка пакета
@@ -99,13 +83,13 @@ namespace ZXNServerK
 
                             if (sym03 == "0") //если запрос каталога 1024
                             {
-                                Console.WriteLine("Входящий пакет 0: Запрос каталога");
+                                Console.WriteLine("Incoming packet: 0: Request a catalog");
                                 //заполнить каталог
                                 string path = Directory.GetCurrentDirectory(); //узнать текущий путь
                                 string[] files_in_dir = Directory.GetFiles(path, "*.*"); //получить список файлов в каталоге
                                 //if (files_in_dir.Length > files_pag) Array.Resize(ref files_in_dir, files_pag);//ограничение файлов в каталоге
                                 //Array.Sort(files_in_dir); //сортировка по имени
-                                byte[] data_out = new byte[2000]; //буфер для отправки
+                                byte[] data_out = new byte[buf_size]; //буфер для отправки
                                 data_out[0] = Convert.ToByte('Z'); //метка заголовка
                                 data_out[1] = Convert.ToByte('X');
                                 data_out[2] = Convert.ToByte('N');
@@ -150,12 +134,9 @@ namespace ZXNServerK
                                 data_out[1024 + 32] = Convert.ToByte(crc_l);//запишем в пакет контрольную сумму
                                 data_out[1024 + 33] = Convert.ToByte(crc_h);
                                 //
-                                //Определение адреса клиента
-                                string remoteAddress2 = remoteIp.Address.ToString();
-                                int remotePort2 = remoteIp.Port;
-                                UdpClient sender = new UdpClient(); // создаем UdpClient для отправки сообщений
-                                Console.WriteLine("Исходящий пакет 1: Каталог. Часть " + file_shift);
-                                sender.Send(data_out, pack_size1024, remoteAddress2, remotePort2); // отправка каталога
+                                Console.WriteLine("Outgoing packet 1: Catalog. Part " + file_shift);
+                                stream.Write(data_out, 0, pack_size1024); // отправка каталога
+                                 
 
                             }
 
@@ -168,7 +149,7 @@ namespace ZXNServerK
                                 if (sym03 == "2") {pack_size_full = pack_size1024; pack_size_com = 1024; type_pack = 3;}; //параметры пакета
                                 if (sym03 == "6") { pack_size_full = pack_size256; pack_size_com = 256; type_pack = 7; }
                                 //Отправка файла
-                                Console.WriteLine("Входящий пакет " + sym03 + ": Запрос приёма файла");
+                                Console.WriteLine("Incoming packet: " + sym03 + ": Request to receive file");
                                 //прочитаем имя файла из запроса
                                 byte[] file_name2 = new byte[12]; //временный массив
                                 Array.Copy(data, 16, file_name2, 0, 12); //копировать имя файла
@@ -178,7 +159,7 @@ namespace ZXNServerK
 
 
                                 byte[] data_file = new byte[max_file_size+1024]; //буфер для файла
-                                byte[] data_out = new byte[2000]; //буфер для отправки
+                                byte[] data_out = new byte[buf_size]; //буфер для отправки
                                 data_out[0] = Convert.ToByte('Z'); //метка заголовка
                                 data_out[1] = Convert.ToByte('X');
                                 data_out[2] = Convert.ToByte('N');
@@ -200,10 +181,6 @@ namespace ZXNServerK
                                 }
                                 data_out[3] = type_pack; //записать тип пакета для отправки
 
-                                //Определение адреса клиента
-                                string remoteAddress2 = remoteIp.Address.ToString();
-                                int remotePort2 = remoteIp.Port;
-                                UdpClient sender = new UdpClient(); // создаем UdpClient для отправки сообщений
                                 //отправка нужной части
                                 int file_shift = Int32.Parse(data[4].ToString()) + Int32.Parse(data[5].ToString()) * 256;//прочитаем смещение
                                 Array.Copy(data_file, file_shift * pack_size_com, data_out, 32, pack_size_com); //копировать часть массива в выходной буфер
@@ -226,10 +203,10 @@ namespace ZXNServerK
                                 data_out[pack_size_com + 33] = Convert.ToByte(crc_h);
                                 //
                                 if (type_pack == Convert.ToByte("255"))
-                                    Console.WriteLine("Исходящий пакет "+type_pack+": Ошибка");
-                                else Console.WriteLine("Исходящий пакет " + type_pack + ": Файл " + file_in + " часть " + file_shift);
+                                    Console.WriteLine("Outgoing packet "+type_pack+": Error");
+                                else Console.WriteLine("Outgoing packet " + type_pack + ": File " + file_in + " part " + file_shift);
 
-                                sender.Send(data_out, pack_size_full, remoteAddress2, remotePort2); // отправка части
+                                stream.Write(data_out, 0, pack_size_full); // отправка части
                             }
 
 
@@ -237,12 +214,12 @@ namespace ZXNServerK
                             if (sym03 == "4" || sym03 == "8") //если запрос на передачу файла на сервер, 1024 или 256
                             {
                                 //Приём файла
-                                Console.WriteLine("Входящий пакет " + sym03 + ": Запрос передачи файла");
+                                Console.WriteLine("Incoming packet: " + sym03 + ": File Transfer Request");
                                 if (sym03 == "4") { pack_size_full = pack_size32; pack_size_com = 1024; type_pack = 5; }; //параметры пакета
                                 if (sym03 == "8") { pack_size_full = pack_size32; pack_size_com = 256; type_pack = 9; }
 
                                 byte[] data_file = new byte[max_file_size+1024]; //буфер для файла
-                                byte[] data_out = new byte[2000]; //буфер для отправки
+                                byte[] data_out = new byte[buf_size]; //буфер для отправки
 
                                 //Посчитаем контрольную сумму принятого пакета
                                 int crc = 0;
@@ -298,12 +275,6 @@ namespace ZXNServerK
                                         type_pack = 255; //тип пакета Ошибка, если не могли создать
                                     }
                                 }
-                                //
-
-                                //Определение адреса клиента
-                                string remoteAddress2 = remoteIp.Address.ToString();
-                                int remotePort2 = remoteIp.Port;
-                                UdpClient sender = new UdpClient(); // создаем UdpClient для отправки сообщений
 
                                 //подготовка нужной части
                                 int file_shift = Int32.Parse(data[4].ToString()) + Int32.Parse(data[5].ToString()) * 256;//прочитаем смещение
@@ -349,11 +320,11 @@ namespace ZXNServerK
                                 //
 
                                 if (type_pack == Convert.ToByte("255"))
-                                    Console.WriteLine("Исходящий пакет "+type_pack+": Ошибка");
+                                    Console.WriteLine("Outgoing packet "+type_pack+": Error");
                                 else
-                                    Console.WriteLine("Исходящий пакет "+type_pack+": Файл принят " + file_out + " часть " + file_shift);
+                                    Console.WriteLine("Outgoing packet "+type_pack+": File accepted " + file_out + " part " + file_shift);
 
-                                sender.Send(data_out, pack_size_full, remoteAddress2, remotePort2); // отправка подтверждения
+                                stream.Write(data_out, 0, pack_size_full); // отправка подтверждения
                             }
 
 
@@ -361,19 +332,26 @@ namespace ZXNServerK
                             
                         }
                         else
-                            Console.WriteLine("Входящий пакет: Неизвестный");
+                            Console.WriteLine("Incoming packet: Unknown, length "+bytesRead);
+
                     }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
-            }
-            finally
-            {
-                receiver.Close();
+
             }
         }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error communicating with client: " + ex.Message);
+        }
+        finally
+        {
+            stream.Close();
+            client.Close();
+            clients.Remove(client);
+            Console.WriteLine("Client disconnected.");
+        }
+
+        
+    }
 
         // Определить функцию API GetShortPathName.
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
@@ -397,5 +375,36 @@ namespace ZXNServerK
         {
             return new FileInfo(short_name).FullName;
         }
-    }
+
 }
+
+class Program
+{
+    static string ver = "2025 03 20"; //версия сервера
+    static int localPort; // локальный порт для прослушивания входящих подключений
+    static void Main(string[] args) //старт приложения тут
+    {
+        try
+            {
+                if (args.Length == 0) // если не передан параметр
+                    localPort = 8888; //порт будет такой
+                else
+                    localPort = Int32.Parse(args[0]); //или получим номер порта как параметр
+                Console.Write("ZXNServerK v." + ver + "\n");
+                Console.Write("Listening port: " + localPort + "\n"); // локальный порт
+
+                SimpleServer server = new SimpleServer();
+                server.Start(localPort); // Выбирается порт, любой
+
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+
+        
+    }
+
+}
+

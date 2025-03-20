@@ -1,98 +1,56 @@
     MODULE Wifi
-bytes_avail dw 0 ;байт для приёма
-buffer_pointer dw 0 ;указатель на адрес буфера
-closed db 1 ;флаг "соединение закрыто"
-; ;link_id db 0 ;текущий id соединения
-buffer_end equ #ff ;ограничение буфера адрес #ff00
+bytes_avail dw 0
+buffer_pointer dw 0
+closed db 1
+; Initialize Wifi chip to work
+init:
+    ld hl, .uartIniting : call print_sys
+    call Uart.init
+    ld hl, .chipIniting : call print_sys
+    EspCmdOkErr "ATE0"
+    jr c, .initError
 
-; ; Initialize Wifi chip to work
-; init:
-    ; ld hl, .uartIniting : call drvgmx.printZ
-    ; call Uart.init ;
-    ; ld hl, .chipIniting : call drvgmx.printZ
-    ; ;EspCmdOkErr "ATE0"
-	; ld hl,cmd_ATE0
-	; call espSendZ
-	; call checkOkErr
-    ; jr c, .initError
-
-    ; ;EspCmdOkErr "AT+CIPSERVER=0" 
-	; ld hl,cmd_CIPSERVER
-	; call espSendZ
-	; call checkOkErr
-    ; ;jr c, .initError ;не проверяем ошибку
-    ; ;EspCmdOkErr "AT+CIPCLOSE" ;  Close if there some connection was. Don't care about result
-	; ld hl,cmd_CIPCLOSE
-	; call espSendZ
-	; ld a,'5' ;закрыть все соединения
-	; call Uart.write
-    ; ld a, 13 : call Uart.write
-    ; ld a, 10 : call Uart.write
-	; call checkOkErr	
-    ; ;jr c, .initError ;не проверяем ошибку
-    ; ;EspCmdOkErr "AT+CIPMUX=0" ; Single connection mode
-	; ld hl,cmd_CIPMUX
-	; call espSendZ
-	; call checkOkErr	
-    ; jr c, .initError
+    EspCmdOkErr "AT+CIPSERVER=0" 
+    EspCmdOkErr "AT+CIPCLOSE" ; Close if there some connection was. Don't care about result
+    EspCmdOkErr "AT+CIPMUX=0" ; Single connection mode
+    jr c, .initError
     
-    ; ;EspCmdOkErr "AT+CIPDINFO=0" ; Disable additional info
-	; ld hl,cmd_CIPDINFO
-	; call espSendZ
-	; call checkOkErr		
-    ; jr c, .initError
+    EspCmdOkErr "AT+CIPDINFO=0" ; Disable additional info
+    jr c, .initError
 
-    ; ld hl, .doneInit : call drvgmx.printZ
+    ld hl, .doneInit : call print_sys
     
-    ; or a
-    ; ret
-; .initError
-    ; ld hl, .errMsg : call drvgmx.printZ
-    ; scf
-    ; ret
-; .errMsg db "WiFi chip init failed!",13,0
-; .uartIniting db "Uart initing...",13,0
-; .chipIniting db "Chip initing...",13,0
-; .doneInit    db "Done!",13,0
-    ; IFNDEF PROXY   
-; ; HL - host pointer in gopher row
-; ; DE - port pointer in gopher row
-; openTCP:
-    ; push de
-    ; push hl
-    ; ;EspCmdOkErr "AT+CIPCLOSE" ; Don't care about result. Just close if it didn't happens before
-	; ld hl,cmd_CIPCLOSE
-	; call espSendZ
-	; ; ld a,(link_id)
-	; ; call Uart.write	
-    ; ld a, 13 : call Uart.write
-    ; ld a, 10 : call Uart.write
-	; call checkOkErr	
-	
-    ; ;EspSend 'AT+CIPSTART,"TCP","' ;
-	; ld hl,cmd_CIPSTART
-	; call espSendZ
-	; ; ld a,(link_id)
-	; ; call Uart.write	
-	; ; ld hl,cmd_CIPSTART2
-	; ; call espSendZ
+    or a
+    ret
+.initError
+    ld hl, .errMsg : call print_sys
+    scf
+    ret
+.errMsg db "WiFi chip init failed!",0
+.uartIniting db "Uart initing...",13,0
+.chipIniting db "Chip initing...",13,0
+.doneInit    db "Done!",0
+    IFNDEF PROXY   
+; HL - host pointer in gopher row
+; DE - port pointer in gopher row
+openTCP:
+    push de
+    push hl
+    EspCmdOkErr "AT+CIPCLOSE" ; Don't care about result. Just close if it didn't happens before
+    EspSend 'AT+CIPSTART="TCP","'
+    pop hl
+    call espSendT
+    EspSend '",'
+    pop hl
+    call espSendT
+    ld a, 13 : call Uart.write
+    ld a, 10 : call Uart.write
+    xor a : ld (closed), a
+    jp checkOkErr
 
-	
-    ; pop hl
-    ; call espSendT
-    ; ;EspSend '",'
-    ; ld a, '"' : call Uart.write
-    ; ld a, ',' : call Uart.write	
-    ; pop hl
-    ; call espSendT
-    ; ld a, 13 : call Uart.write
-    ; ld a, 10 : call Uart.write
-    ; xor a : ld (closed), a
-    ; jp checkOkErr
-
-; continue:
-    ; ret
-    ; ENDIF
+continue:
+    ret
+    ENDIF
 
 
 
@@ -131,55 +89,38 @@ checkOkErr:
 ; Send buffer to UART
 ; HL - buff
 ; E - count
-; espSend:
-    ; ld a, (hl) : call Uart.write
-    ; inc hl 
-    ; dec e
-    ; jr nz, espSend
-    ; ret
-	
-; Send buffer to UART
-; HL - buff (0 - end!)
-espSendZ:
-    ld a, (hl) 
-	or a
-	ret z
-	call Uart.write
+espSend:
+    ld a, (hl) : call Uart.write
     inc hl 
-    jr espSendZ
+    dec e
+    jr nz, espSend
+    ret
 
+; HL - string that ends with one of the terminator(CR/LF/TAB/NULL)
+espSendT:
+    ld a, (hl) 
 
-; ; HL - string that ends with one of the terminator(CR/LF/TAB/NULL)
-; espSendT:
-    ; ld a, (hl) 
-
-    ; and a : ret z
-    ; cp 9 : ret z 
-    ; cp 13 : ret z
-    ; cp 10 : ret z
+    and a : ret z
+    cp 9 : ret z 
+    cp 13 : ret z
+    cp 10 : ret z
     
-    ; call Uart.write
-    ; inc hl 
-    ; jr espSendT
+    call Uart.write
+    inc hl 
+    jr espSendT
 
-; HL - stringZ to send
-; Adds CR LF
+; ; HL - stringZ to send
+; ; Adds CR LF
 ; tcpSendZ:
     ; push hl
-    ; ;EspSend "AT+CIPSEND=" ;
-	; ld hl,cmd_CIPSEND
-	; call espSendZ
-	; ; ld a,(link_id)
-	; ; call Uart.write	
-    ; ;ld a, ',' : call Uart.write
-	
+    ; EspSend "AT+CIPSEND="
     ; pop de : push de
     ; call strLen
     ; inc hl : inc hl ; +CRLF
     ; call hlToNumEsp
     ; ld a, 13 : call Uart.write
     ; ld a, 10 : call Uart.write
-    ; call checkOkErr : jr c,.exit_err
+    ; call checkOkErr : ret c
 ; .wait
     ; call Uart.read : cp '>' : jr nz, .wait
     ; pop hl
@@ -192,10 +133,56 @@ espSendZ:
     ; ld a, 13 : call Uart.write
     ; ld a, 10 : call Uart.write
     ; jp checkOkErr
-; .exit_err
-	; pop hl
-	; ret
 
+getPacket:
+    call Uart.read
+	;jp nc,getPacket_ex
+    cp '+' : jr z, .ipdBegun    ; "+IPD," packet 
+    cp 'O' : jr z, .closedBegun ; It enough to check "OSED\n" :-)
+    jr getPacket
+.closedBegun
+    call Uart.read : cp 'S' : jr nz, getPacket
+    call Uart.read : cp 'E' : jr nz, getPacket
+    call Uart.read : cp 'D' : jr nz, getPacket
+    call Uart.read : cp 13 : jr nz, getPacket
+    ld a, 1, (closed), a
+    ret
+.ipdBegun
+    call Uart.read : cp 'I' : jr nz, getPacket
+    call Uart.read : cp 'P' : jr nz, getPacket
+    call Uart.read : cp 'D' : jr nz, getPacket
+    call Uart.read ; Comma
+    call .count_ipd_lenght : ld (bytes_avail), hl 
+    ld bc, hl
+    ld hl, (buffer_pointer)
+.readp
+    ld a, h : cp #ff : jr nc, .skipbuff
+    push bc, hl
+    call Uart.read
+    pop hl, bc
+    ld (hl), a
+    dec bc : inc hl
+    ld a, b : or c : jr nz, .readp
+    ld (buffer_pointer), hl
+    ret
+.skipbuff 
+    push bc
+    call Uart.read
+    pop bc
+    dec bc : ld a, b : or c : jr nz, .skipbuff
+    ret
+.count_ipd_lenght
+		ld hl,0			; count lenght
+.cil1	push  hl
+        call Uart.read
+        pop hl 
+		cp ':' : ret z
+		sub 0x30 : ld c,l : ld b,h : add hl,hl : add hl,hl : add hl,bc : add hl,hl : ld c,a : ld b,0 : add hl,bc
+		jr .cil1
+
+; getPacket_ex
+	; scf ;error
+	; ret
 
 
 ; HL - string to send
@@ -204,16 +191,10 @@ espSendZ:
 tcpSend:
     push hl
 	push de ;
-    ;EspSend "AT+CIPSEND=" ;
-	ld hl,cmd_CIPSEND
-	call espSendZ
-	; ld a,(link_id)
-	; call Uart.write	
-    ;ld a, ',' : call Uart.write
-	
+    EspSend "AT+CIPSEND=" ;
     pop hl : push hl ;длина
     ;call strLen
-    inc hl : inc hl ; +CRLF
+    ;inc hl : inc hl ; +CRLF
     call hlToNumEsp
     ld a, 13 : call Uart.write
     ld a, 10 : call Uart.write
@@ -238,57 +219,10 @@ tcpSend:
 	pop de
 	pop hl
 	ret
-	
-	
-	
 
-getPacket:
-    call Uart.read
-    cp '+' : jr z, .ipdBegun    ; "+IPD," packet 
-    cp 'O' : jr z, .closedBegun ; It enough to check "OSED\n" :-)
-    jr getPacket
-.closedBegun
-    call Uart.read : cp 'S' : jr nz, getPacket
-    call Uart.read : cp 'E' : jr nz, getPacket
-    call Uart.read : cp 'D' : jr nz, getPacket
-    call Uart.read : cp 13 : jr nz, getPacket
-    ld a, 1, (closed), a
-    ret
-.ipdBegun
-    call Uart.read : cp 'I' : jr nz, getPacket
-    call Uart.read : cp 'P' : jr nz, getPacket
-    call Uart.read : cp 'D' : jr nz, getPacket
-    call Uart.read ; Comma 
-	; call Uart.read ; link ID
-	; ld (link_id),a ;запомнить
-	;call Uart.read ; Comma
-    call .count_ipd_lenght : ld (bytes_avail), hl 
-    ld bc, hl
-    ld hl, (buffer_pointer)
-.readp
-    ld a, h : cp buffer_end : jr nc, .skipbuff ;
-    push bc, hl
-    call Uart.read
-    pop hl, bc
-    ld (hl), a
-    dec bc : inc hl
-    ld a, b : or c : jr nz, .readp
-    ld (buffer_pointer), hl
-    ret
-.skipbuff 
-    push bc
-    call Uart.read
-    pop bc
-    dec bc : ld a, b : or c : jr nz, .skipbuff
-    ret
-.count_ipd_lenght
-		ld hl,0			; count lenght
-.cil1	push  hl
-        call Uart.read
-        pop hl 
-		cp ':' : ret z
-		sub 0x30 : ld c,l : ld b,h : add hl,hl : add hl,hl : add hl,bc : add hl,hl : ld c,a : ld b,0 : add hl,bc
-		jr .cil1
+
+
+
 
 ; Based on: https://wikiti.brandonw.net/index.php?title=Z80_Routines:Other:DispHL
 ; HL - number
@@ -312,19 +246,5 @@ hlToNumEsp:
 	call Uart.write
     pop bc
     ret
-	
-
-; ;команды	
-; cmd_ATE0 db "ATE0",13,10,0 ;эхо?
-; cmd_CIPSERVER db "AT+CIPSERVER=0",13,10,0 ;удалить сервер
-; cmd_CIPSTART db 'AT+CIPSTART="' ;продолжение
-	; ;тут тип
-; cmd_CIPSTART2 db 'TCP","',0 ;продолжение
-cmd_CIPSEND db "AT+CIPSEND=",0 ;отправить данные
-	; ;тут ID
-; cmd_CIPCLOSE db "AT+CIPCLOSE",0 ;закрыть соединение
-	; ;тут ID
-; cmd_CIPMUX db "AT+CIPMUX=0",13,10,0 ; Single connection mode
-; cmd_CIPDINFO db "AT+CIPDINFO=0",13,10,0 ; Disable additional info
 
     ENDMODULE

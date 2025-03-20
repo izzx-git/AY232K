@@ -15,16 +15,16 @@ lenghtName equ 16 ;длина имени файла в каталоге
 scroll_len equ 13 ;длина области скрола сообщений
 pack_size_1024_com equ 1024 ;длина основной части большого пакета
 pack_size_1024 equ pack_size_1024_com+pack_size_32_com+2 ;длина пакета полная 
-pack_size_1024_full equ pack_size_1024+40 ;длина большого пакета со служебной информацией
-pack_size_1024_echo equ 26 ;длина ответа ESP на отправку большого пакета
+;pack_size_1024_full equ pack_size_1024+40 ;длина большого пакета со служебной информацией
+;pack_size_1024_echo equ 26 ;длина ответа ESP на отправку большого пакета
 pack_size_32_com equ 32 ;длина основной части малого пакета (заголовка)
 pack_size_32 equ pack_size_32_com+2 ;длина пакета заголовка полная
-pack_size_32_full equ pack_size_32+40 ;длина малого пакета со служебной информацией ??
-pack_size_32_echo equ 24 ;длина ответа ESP на отправку малого пакета
+;pack_size_32_full equ pack_size_32+40 ;длина малого пакета со служебной информацией ??
+;pack_size_32_echo equ 24 ;длина ответа ESP на отправку малого пакета
 pack_size_256_com equ 256 ;длина основной части пакета 256
 pack_size_256 equ pack_size_256_com+pack_size_32_com+2 ;длина пакета полная 
-pack_size_256_full equ pack_size_256+39 ;длина пакета 256 со служебной информацией
-pack_size_256_echo equ 25 ;длина ответа ESP на отправку пакета 256
+;pack_size_256_full equ pack_size_256+39 ;длина пакета 256 со служебной информацией
+;pack_size_256_echo equ 25 ;длина ответа ESP на отправку пакета 256
 files_view equ 24-3 ;показывать файлов в каталоге
 col_pos_l equ #5800 ;позиция для покраски левая панель
 col_pos_r equ #5800+31-9 ;позиция для покраски правая панель
@@ -545,8 +545,11 @@ renewcat_r1
 	; ld (rec_buf_adr_pack),de
 	; ld (rec_buf_adr_pack1),de
 
+	;call open_tcp
+	;jr c,renewcat_r ;сначала если не удачно
+	
 	ld hl,trn_buf ;откуда
-	ld de,pack_size_32_com ;размер
+	ld de,pack_size_32 ;размер
 	call Wifi.tcpSend ;отправить
 	jr c,renewcat_r ;сначала если не удачно
 	
@@ -679,10 +682,26 @@ open_trd0
 	ld a,(hl)
 	cp "t"
 	jr nz,open_trd0_ckeck
-	jr open_trd0_ckeck_ext_ok
+	jr open_trd0_ckeck_ext_ok1
 open_trd0_ckeck	
 	cp "T"
 	jp nz,wait ;выход
+	
+open_trd0_ckeck_ext_ok1
+	inc hl
+	ld a,(hl)
+	cp "r"
+	jr z,open_trd0_ckeck_ext_ok2
+	cp "R"
+	jp nz,wait ;выход	
+	
+open_trd0_ckeck_ext_ok2
+	inc hl
+	ld a,(hl)
+	cp "d"
+	jr z,open_trd0_ckeck_ext_ok
+	cp "D"
+	jp nz,wait ;выход	
 	
 	
 open_trd0_ckeck_ext_ok			
@@ -743,9 +762,11 @@ open_trd3	;цикл
 			jp start_h
 			
 open_trd2			
-
+			;call open_tcp
+			;jr c,open_trd3 ;если ошибка, то новая попытка
+			
 			ld hl,trn_buf ;откуда
-			ld de,pack_size_32_com ;размер
+			ld de,pack_size_32 ;размер
 			call Wifi.tcpSend ;отправить
 			jr c,open_trd3 ;если ошибка, то новая попытка
 
@@ -1405,6 +1426,9 @@ sec256_to_srv2
 			call calc_check_sum ;проверить сумму
 			ld (trn_buf+pack_size_256_com+pack_size_32_com),hl ;записать её в пакет
 
+			;call open_tcp
+			;jr c,sec256_to_srv ;если ошибка, повтор
+
 			ld hl,trn_buf ;откуда
 			ld de,pack_size_256 ;размер
 			call Wifi.tcpSend ;отправить
@@ -1643,9 +1667,11 @@ copyF_RL3
 			ret
 			
 copyF_RL2			
-
+			;call open_tcp
+			;jr c,copyF_RL3 ;если ошибка, то новая попытка
+	
 			ld hl,trn_buf ;откуда
-			ld de,pack_size_32_com ;размер
+			ld de,pack_size_32 ;размер
 			call Wifi.tcpSend ;отправить
 			jr c,copyF_RL3 ;если ошибка, то новая попытка
 			
@@ -1944,7 +1970,10 @@ r_calc_next_pos3
 			ld (check_sum_size),bc
 			call calc_check_sum ;проверить сумму
 			ld (trn_buf+pack_size_1024_com+pack_size_32_com),hl ;записать её в пакет
-			
+	
+			;call open_tcp
+			;jr c,read_trd3_retr ;если ошибка, то новая попытка
+	
 			ld hl,trn_buf ;откуда
 			ld de,pack_size_1024 ;размер
 			call Wifi.tcpSend ;отправить
@@ -2230,9 +2259,11 @@ write_trd3 ;цикл
 			jp exit_h
 			
 calc_next_pos3			
+			;call open_tcp
+			;jr c,write_trd3 ;если ошибка, то новая попытка
 	
 			ld hl,trn_buf ;откуда
-			ld de,pack_size_32_com ;размер
+			ld de,pack_size_32 ;размер
 			call Wifi.tcpSend ;отправить
 			jr c,write_trd3 ;если ошибка, то новая попытка
 
@@ -2925,9 +2956,17 @@ sel_left_pan ;выбор левой панели
 
 init_dev ;инициализация устройства передачи
 ;WAITKEY	XOR A:IN A,(#FE):CPL:AND #1F:JR Z,WAITKEY
-	ld hl,mes_req_init
-	call print_sys
-	call Uart.init
+	; ld hl,mes_req_init
+	; call print_sys
+	call Wifi.init
+	;ret
+
+open_tcp ;открыть соединение
+	ld hl,mes_open_tcp
+	call print_sys	
+	ld hl,server_name	
+	ld de,server_port	
+	jp Wifi.openTCP
 
 	; ld de,pack_size_1024 ;размер полного пакета
 	; call start_rcv ;всё примем
@@ -2938,64 +2977,64 @@ init_dev ;инициализация устройства передачи
 	; call start_trn1 ;оправка	
 	; call read_buf
 	
-	ld hl,cmd_ipclose ;закрыть соединение 
-	ld de,cmd_ipclose_e-cmd_ipclose
-	call start_trn1 ;оправка	
+	; ld hl,cmd_ipclose ;закрыть соединение 
+	; ld de,cmd_ipclose_e-cmd_ipclose
+	; call start_trn1 ;оправка	
 	
-	ld de,pack_size_1024_full ;размер полного пакета
-	call start_rcv ;всё примем
-	;call read_buf
+	; ld de,pack_size_1024_full ;размер полного пакета
+	; call start_rcv ;всё примем
+	; ;call read_buf
 	
-	;подготовить строку открытия соединения
-	ld hl,cmd_ipstart 
-	ld bc,cmd_ipstart_e-cmd_ipstart
-	ld ix,bc ;длина
-	ld de,cipstart_line
-	ldir
-	;имя сервера
-	ld hl,server_name
-init_dev_server
-	ld a,(hl)
-	cp " "
-	jr c,init_dev1
-	ldi
-	inc ix
-	jr init_dev_server
-init_dev1
-	ld a,'"'
-	ld (de),a
-	inc de
-	inc ix
-	ld a,','
-	ld (de),a	
-	inc de
-	inc ix
-	;порт 
-	ld hl,server_port
-init_dev_server2
-	ld a,(hl)
-	cp " "
-	jr c,init_dev2
-	ldi
-	inc ix
-	jr init_dev_server2
-init_dev2	
-	ld a,13
-	ld (de),a
-	inc de
-	inc ix
-	ld a,10
-	ld (de),a
-	inc ix	
+	; ;подготовить строку открытия соединения
+	; ld hl,cmd_ipstart 
+	; ld bc,cmd_ipstart_e-cmd_ipstart
+	; ld ix,bc ;длина
+	; ld de,cipstart_line
+	; ldir
+	; ;имя сервера
+	; ld hl,server_name
+; init_dev_server
+	; ld a,(hl)
+	; cp " "
+	; jr c,init_dev1
+	; ldi
+	; inc ix
+	; jr init_dev_server
+; init_dev1
+	; ld a,'"'
+	; ld (de),a
+	; inc de
+	; inc ix
+	; ld a,','
+	; ld (de),a	
+	; inc de
+	; inc ix
+	; ;порт 
+	; ld hl,server_port
+; init_dev_server2
+	; ld a,(hl)
+	; cp " "
+	; jr c,init_dev2
+	; ldi
+	; inc ix
+	; jr init_dev_server2
+; init_dev2	
+	; ld a,13
+	; ld (de),a
+	; inc de
+	; inc ix
+	; ld a,10
+	; ld (de),a
+	; inc ix	
 	
-	ld hl,cipstart_line
-	ld de,ix ;длина
-	call start_trn1 ;оправка
+	; ld hl,cipstart_line
+	; ld de,ix ;длина
+	; call start_trn1 ;оправка
 
-	ld de,pack_size_1024_full ;размер полного пакета
-	call start_rcv ;всё примем	
-	;call read_buf
-	ret
+	; ld de,pack_size_1024_full ;размер полного пакета
+	; call start_rcv ;всё примем	
+	; ;call read_buf
+	; ret
 	
 ;read_buf	;чтение в буфер
 	; ld bc,257 ;очистить буфер - убрать!
@@ -3312,41 +3351,41 @@ cat_space db "            ",0 ;пробелы для очистки
 mes_sys_at ;позиция печати сист. сообщений
 	db 22,23,0,0
 mes_req_cat
-	db "Cat in request  ",0
+	db "Cat in request",0
 mes_rec_cat
 	db "Cat "
 mes_rec_cat_num	
-	db "000 in OK   ",0
+	db "000 in OK",0
 mes_req_part_file
-	db "File in request ",0	
+	db "File in request",0	
 mes_trq_part_file
 	db "File out request",0	
 mes_rec_file
-	db "File in OK      ",0
+	db "File in OK",0
 mes_trn_file
-	db "File out OK     ",0	
+	db "File out OK",0	
 mes_rec_part_file
-	db "Part in OK      ",0
+	db "Part in OK",0
 mes_trn_part_file
-	db "Part out OK     ",0
+	db "Part out OK",0
 mes_wrt_part_file
 	db "Write "
 mes_wrt_part_file_num	
-	db "000       ",0	
+	db "000",0	
 mes_rd_part_file
 	db "Read "
 mes_rd_part_file_num	
-	db "000        ",0	
+	db "000",0	
 mes_req_init
-	db "Init            ",0
+	db "Init",0
 ; mes_translink_off
 	; db "ESP link off    ",0
 ; mes_translink_on
 	; db "ESP link on     ",0
 mes_esp_rst
-	db "ESP reset       ",0
+	db "ESP reset",0
 mes_ok
-	db "OK              ",0
+	db "OK",0
 
 mes_win_cls
 	db 22,14,13,"                "
@@ -3366,13 +3405,13 @@ mes_trd_dsk db 22,14,28,"A"
 	db 22,15,13,"  Y to start   "
 	db 22,16,13,"  N to cancel  ",0
 mes_chs_error
-	db "Check sum error ",0		
+	db "Check sum error",0		
 mes_pac_error
-	db "Packet error    ",0	
+	db "Packet error",0	
 mes_stopped
-	db "Stopped         ",0
+	db "Stopped",0
 mes_title
-	db 22,0,14,"AY232K v0.1.2"	
+	db 22,0,14,"AY232K v0.1.3"	
 	db 22,2,14,"Arrow keys"
 	db 22,3,14,"R - renew"
 	db 22,4,14,"A-D, H - disk"
@@ -3429,7 +3468,8 @@ mes_port
 	db 22,23,18,"Port: "
 server_port ds 4 ;порт	
 	db 0
-
+mes_open_tcp
+	db "Open TCP...",0
 
 
 scroll_sys ;скрол области системных сообщений
@@ -3494,6 +3534,23 @@ scroll_sys4
 	inc d
 	dec a
 	jr nz,scroll_sys4
+	
+	;почистить нижнюю строку
+	ld hl,#4000+2048+2048+7*32
+	ld de,#4000+2048+2048+7*32+1
+	ld a,8
+scroll_sys_e	
+	push hl
+	push de
+	ld bc,scroll_len-1
+	ld (hl),0
+	ldir
+	pop de
+	pop hl
+	inc h
+	inc d
+	dec a
+	jr nz,scroll_sys_e	
 	ret
 	
 	
@@ -3844,9 +3901,9 @@ check_init
 	ret c
 	xor a
 	ld (check_init_count),a	
-	call init_dev ;пора сбросить
+	call open_tcp ;init_dev ;пора сбросить
 	ret
-check_init1 ;не равны
+check_init1 ;не равныcheck_init
 	ld e,(hl) ;запомнить новое значение
 	inc hl
 	ld d,(hl)
@@ -3856,6 +3913,7 @@ check_init1 ;не равны
 	ret
 
 ;здесь драйвер устройства
+		include "drivers/utils.asm"
 		include "drivers/zx-wifi.asm"
 		include "drivers/wifi.asm"
 		include "at_command.asm"		
@@ -4485,7 +4543,7 @@ copyF_LR_FAT_one ;скопировать один файл слева напра
 			add hl,bc
 			ld a,(hl) ;размер файла 4й байт
 			cp 4
-			jp nc,copyF_LR_error ;если слишком большой
+			jp nc,copyF_LR_error ;если слишком большой (больше 67108864)
 			ld c,a ;4й
 			dec hl
 			ld a,(hl) ;размер файла 3й байт
@@ -4639,6 +4697,9 @@ sec1024_to_srv2
 			call calc_check_sum ;проверить сумму
 			ld (trn_buf+pack_size_1024_com+pack_size_32_com),hl ;записать её в пакет
 
+			;call open_tcp
+			;jr c,sec1024_to_srv ;если ошибка, повтор
+
 			ld hl,trn_buf ;откуда
 			ld de,pack_size_1024 ;размер
 			call Wifi.tcpSend ;отправить
@@ -4790,7 +4851,7 @@ copyF_RL_FAT_one ;по одному файлу справа налево FAT
 			add hl,bc
 			ld a,(hl) ;размер файла 4й байт
 			cp 4
-			jp nc,copyF_LR_error ;если слишком большой
+			jp nc,copyF_LR_error ;если слишком большой (больше 67108864)
 			ld c,a ;4й
 			dec hl
 			ld a,(hl) ;размер файла 3й байт
@@ -4940,9 +5001,12 @@ copyF_RL_FAT3
 			ccf ;C=1
 			ret
 			
-copyF_RL_FAT2			
+copyF_RL_FAT2		
+			;call open_tcp
+			;jr c,copyF_RL_FAT3 ;если ошибка, то новая попытка
+			
 			ld hl,trn_buf ;откуда
-			ld de,pack_size_32_com ;размер
+			ld de,pack_size_32 ;размер
 			call Wifi.tcpSend ;отправить
 			jr c,copyF_RL_FAT3 ;если ошибка, то новая попытка
 			

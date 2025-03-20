@@ -26,24 +26,24 @@ cmd_brk
 	db "+++"
 cmd_brk_end
 
-cmd_ipstart db 'AT+CIPSTART="UDP","' ;имя сервера в файле настроек
-cmd_ipstart_e
+; cmd_ipstart db 'AT+CIPSTART="TCP","' ;имя сервера в файле настроек
+; cmd_ipstart_e
 
 
-cmd_ipclose db "AT+CIPCLOSE",13,10
-cmd_ipclose_e
+; cmd_ipclose db "AT+CIPCLOSE",13,10
+; cmd_ipclose_e
 
-cmd_ipsend_34 db "AT+CIPSEND=34",13,10
-cmd_ipsend_34_e
+; cmd_ipsend_34 db "AT+CIPSEND=34",13,10
+; cmd_ipsend_34_e
 
-cmd_ipsend_1058 db "AT+CIPSEND=1058",13,10
-cmd_ipsend_1058_e
+; cmd_ipsend_1058 db "AT+CIPSEND=1058",13,10
+; cmd_ipsend_1058_e
 
-cmd_ipsend_290 db "AT+CIPSEND=290",13,10
-cmd_ipsend_290_e
+; cmd_ipsend_290 db "AT+CIPSEND=290",13,10
+; cmd_ipsend_290_e
 
-pack_id db "+IPD," ;метка пакета от сервера
-pack_id_e
+; pack_id db "+IPD," ;метка пакета от сервера
+; pack_id_e
 
 ;пример отправки-приёма
 			; ld hl,trn_buf ;откуда
