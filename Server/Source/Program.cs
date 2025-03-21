@@ -1,5 +1,6 @@
 ﻿//Сервер Tcp для ZX AY232K
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
